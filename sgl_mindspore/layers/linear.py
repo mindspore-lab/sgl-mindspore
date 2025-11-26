@@ -94,11 +94,12 @@ class ColParallelLinear(LinearBase):
         return x
 
     def weight_load(self, param: Tensor, weight: torch.Tensor) -> None:
-        tp_rank = get_tensor_model_parallel_rank()
-        output_dim = getattr(param, "output_dim", 0)
-        shard_size = param.shape[output_dim]
-        start_idx = tp_rank * shard_size
-        weight = weight.narrow(output_dim, start_idx, shard_size).contiguous()
+        if weight.numel() > 1:
+            tp_rank = get_tensor_model_parallel_rank()
+            output_dim = getattr(param, "output_dim", 0)
+            shard_size = param.shape[output_dim]
+            start_idx = tp_rank * shard_size
+            weight = weight.narrow(output_dim, start_idx, shard_size).contiguous()
 
         param.set_data(tensor_torch2ms(weight))
         return None
@@ -303,7 +304,7 @@ class RowParallelLinear(LinearBase):
         return None
 
 
-class MoeReplicatedLinear(nn.Cell):
+class MoeReplicatedLinear(LinearBase):
     def __init__(
         self,
         input_size: int,
@@ -313,12 +314,18 @@ class MoeReplicatedLinear(nn.Cell):
         optim_tp_ep_gating_perf: bool = False,
         expert_start_index: Optional[Type] = None,
         expert_end_index: Optional[Type] = None,
+        quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
-        super().__init__()
+        super().__init__(
+            input_size=input_size,
+            output_size=output_size,
+            bias=bias,
+            param_dtype=param_dtype,
+            quant_config=quant_config,
+            prefix=prefix,
+        )
 
-        self.input_size = input_size
-        self.output_size = output_size
         self.enable_bias = bias
         self.param_dtype = param_dtype
         self.optim_tp_ep_gating_perf = optim_tp_ep_gating_perf
@@ -326,23 +333,25 @@ class MoeReplicatedLinear(nn.Cell):
         self.expert_end_index = expert_end_index
 
         self.matmul = ops.MatMul(transpose_b=True)
-
-        self.weight = Parameter(
-            mint.zeros((self.output_size, self.input_size), dtype=self.param_dtype),
-            requires_grad=False,
+        assert self.quant_method is not None
+        self.quant_method.create_weights(
+            layer=self,
+            input_size_per_partition=self.input_size,
+            output_partition_sizes=[self.output_size],
+            input_size=self.input_size,
+            output_size=self.output_size,
+            params_dtype=self.param_dtype,
+            weight_load=self.weight_load,
         )
-        setattr(self.weight, "weigth_load", self.weight_load)
 
         if self.enable_bias:
             self.bias = Parameter(mint.zeros(self.output_size, dtype=self.param_dtype))
             setattr(self.bias, "weight_load", self.weight_load)
 
     def construct(self, input: Tensor) -> Tensor:
-        origin_shape = input.shape
-        x = self.matmul(input.view(-1, origin_shape[-1]), self.weight)
-        if self.enable_bias:
-            x = mint.add(x, self.bias)
-        return x.view(*origin_shape[:-1], -1)
+        bias = self.bias if self.enable_bias else None
+        output = self.quant_method.apply(self, input, bias)
+        return output
 
     def weight_load(self, param: Parameter, weight: torch.Tensor):
         weight = weight.contiguous().to(torch.float32).numpy()

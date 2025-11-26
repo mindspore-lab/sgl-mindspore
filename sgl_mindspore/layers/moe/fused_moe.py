@@ -11,15 +11,11 @@ from mindspore.ops.auto_generate import (
     MoeInitRoutingV2,
     MoeTokenUnpermute,
 )
-from sglang.srt.distributed import (
-    get_tensor_model_parallel_rank,
-)
+from sglang.srt.distributed import get_tensor_model_parallel_rank
+from sglang.srt.layers.quantization.base_config import QuantizationConfig
 
-from sgl_mindspore.utils import (
-    _get_tp_group_name,
-    split_loaded_weight,
-    tensor_torch2ms,
-)
+from sgl_mindspore.layers.quantization.unquant import UnquantizedFusedMoEFFNMethod
+from sgl_mindspore.utils import _get_tp_group_name, split_loaded_weight, tensor_torch2ms
 
 
 def fused_topk(
@@ -83,12 +79,14 @@ class FusedExperts(nn.Cell):
         tp_ep: bool,
         optim_tp_ep_gating_perf: bool,
         use_all2all_kernels: bool,
+        quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
 
         self.group_matmul_op = GroupedMatmulV4()
         self.moe_init_routing_op = MoeInitRoutingV2()
         self.moe_token_unpermute = MoeTokenUnpermute()
+        self.quant_method = None
 
         self.pure_tp = True
         self.pure_ep = False
@@ -130,9 +128,8 @@ class FusedExperts(nn.Cell):
 
     def construct(
         self,
+        layer: nn.Cell,
         hidden_states: Tensor,
-        w1: Tensor,
-        w2: Tensor,
         topk_weights: Tensor,
         topk_ids: Tensor,
         activation: str = "silu",
@@ -141,9 +138,8 @@ class FusedExperts(nn.Cell):
     ) -> Tensor:
         if self.pure_tp:
             hidden_states = self.run_tp_moe(
+                layer,
                 hidden_states,
-                w1,
-                w2,
                 topk_ids,
                 topk_weights,
                 activation,
@@ -152,9 +148,8 @@ class FusedExperts(nn.Cell):
             )
         elif self.pure_ep:
             hidden_states = self.run_ep_moe(
+                layer,
                 hidden_states,
-                w1,
-                w2,
                 topk_ids,
                 topk_weights,
                 activation,
@@ -163,9 +158,8 @@ class FusedExperts(nn.Cell):
             )
         else:
             hidden_states = self.run_tp_ep_moe(
+                layer,
                 hidden_states,
-                w1,
-                w2,
                 topk_ids,
                 topk_weights,
                 activation,
@@ -198,26 +192,13 @@ class FusedExperts(nn.Cell):
             group_list_type=1,
         )[0]
 
-    def _ffn(self, hidden_states, w1, w2, group_list, activation):
-        gate_hidden_out = self._group_matmul(
-            hidden_states=hidden_states, weight=w1, group_list=group_list
-        )
-        gate, hidden = mint.split(
-            gate_hidden_out, (w1.shape[2] // 2, w1.shape[2] // 2), -1
-        )
-        gate = self._gate_activation(gate=gate, activation=activation)
-        hidden = mint.mul(hidden, gate)
-        expert_output = self._group_matmul(
-            hidden_states=hidden, weight=w2, group_list=group_list
-        )
-        expert_output = mint.nan_to_num(expert_output, 0, 0, 0)
-        return expert_output
+    def _ffn(self, layer, hidden_states, group_list, activation):
+        return self.quant_method.apply(layer, hidden_states, group_list, activation)
 
     def run_tp_moe(
         self,
+        layer: nn.Cell,
         hidden_states: Tensor,
-        w1: Tensor,
-        w2: Tensor,
         topk_ids: Tensor,
         topk_weights: Tensor,
         activation: str = "silu",
@@ -239,9 +220,8 @@ class FusedExperts(nn.Cell):
         )
         group_list = group_list.astype(dtype.int64)
         expert_output = self._ffn(
+            layer,
             sorted_input_tensor,
-            w1=w1,
-            w2=w2,
             group_list=group_list,
             activation=activation,
         )
@@ -257,9 +237,8 @@ class FusedExperts(nn.Cell):
 
     def run_tp_ep_moe(
         self,
+        layer: nn.Cell,
         hidden_states: Tensor,
-        w1: Tensor,
-        w2: Tensor,
         topk_ids: Tensor,
         topk_weights: Tensor,
         activation: str = "silu",
@@ -297,9 +276,8 @@ class FusedExperts(nn.Cell):
         group_list = group_list[: self.local_experts_num]
         group_list = group_list.astype(dtype.int64)
         expert_output = self._ffn(
+            layer,
             sorted_input_tensor,
-            w1=w1,
-            w2=w2,
             group_list=group_list,
             activation=activation,
         )
@@ -314,9 +292,8 @@ class FusedExperts(nn.Cell):
 
     def run_ep_moe(
         self,
+        layer: nn.Cell,
         hidden_states: Tensor,
-        w1: Tensor,
-        w2: Tensor,
         topk_ids: Tensor,
         topk_weights: Tensor,
         activation: str = "silu",
@@ -330,9 +307,8 @@ class FusedExperts(nn.Cell):
 
     def _ep_with_dispatch_combine(
         self,
+        layer,
         hidden_states,
-        w1,
-        w2,
         topk_ids,
         topk_weights,
         activation,
@@ -368,6 +344,8 @@ class FusedMoe(nn.Cell):
         activation: str = "silu",
         num_redundant_experts: int = 0,
         optim_tp_ep_gating_perf: bool = False,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
 
@@ -409,30 +387,6 @@ class FusedMoe(nn.Cell):
         self.custom_routing_function = custom_routing_function
         self.e_score_correction_bias = e_score_correction_bias
 
-        self.w13_weight = Parameter(
-            mint.empty(
-                self.global_num_experts,
-                self.hidden_size,
-                2 * self.intermediate_size_per_partition,
-                dtype=self.param_dtype,
-            ),
-            requires_grad=False,
-        )
-        setattr(self.w13_weight, "weight_load", self.weight_load)
-        setattr(self.w13_weight, "is_transpose", True)
-
-        self.w2_weight = Parameter(
-            mint.empty(
-                self.global_num_experts,
-                self.intermediate_size_per_partition,
-                self.hidden_size,
-                dtype=self.param_dtype,
-            ),
-            requires_grad=False,
-        )
-        setattr(self.w2_weight, "weight_load", self.weight_load)
-        setattr(self.w2_weight, "is_transpose", True)
-
         self.all_reduce_from_tp_group = ops.AllReduce(group=self.tp_group)
         self.fused_experts = FusedExperts(
             num_experts=self.global_num_experts,
@@ -447,6 +401,20 @@ class FusedMoe(nn.Cell):
             tp_ep=self.tp_ep,
             optim_tp_ep_gating_perf=self.optim_tp_ep_gating_perf,
             use_all2all_kernels=False,
+        )
+
+        if quant_config is None:
+            quant_method = UnquantizedFusedMoEFFNMethod()
+        else:
+            quant_method = quant_config.get_quant_method(self, prefix)
+        self.fused_experts.quant_method = quant_method
+        quant_method.create_weights(
+            self,
+            self.global_num_experts,
+            self.hidden_size,
+            self.intermediate_size_per_partition,
+            self.param_dtype,
+            weight_load=self.weight_load,
         )
 
     def _load_w13(
@@ -480,15 +448,15 @@ class FusedMoe(nn.Cell):
 
         if shard_id == "w1":
             if is_param_transpose:
-                param[expert_id, :, 0:shard_size] = loaded_weight
+                param[expert_id, :, :shard_size] = loaded_weight
             else:
-                param[expert_id, 0:shard_size, :] = loaded_weight
+                param[expert_id, :shard_size, :] = loaded_weight
         else:
             assert shard_id == "w3"
             if is_param_transpose:
-                param[expert_id, :, shard_size : shard_size * 2] = loaded_weight
+                param[expert_id, :, shard_size:] = loaded_weight
             else:
-                param[expert_id, shard_size : shard_size * 2, :] = loaded_weight
+                param[expert_id, shard_size:, :] = loaded_weight
 
     def _load_w2(
         self,
@@ -742,9 +710,8 @@ class FusedMoe(nn.Cell):
         )
 
         final_hidden_states = self.fused_experts(
+            layer=self,
             hidden_states=hidden_states,
-            w1=self.w13_weight,
-            w2=self.w2_weight,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation=self.activation,
