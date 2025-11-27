@@ -95,10 +95,10 @@ class ColParallelLinear(LinearBase):
 
     def weight_load(self, param: Tensor, weight: torch.Tensor) -> None:
         tp_rank = get_tensor_model_parallel_rank()
-        copy_dim = 0
-        shard_size = param.shape[copy_dim]
+        output_dim = getattr(param, "output_dim", 0)
+        shard_size = param.shape[output_dim]
         start_idx = tp_rank * shard_size
-        weight = weight.narrow(copy_dim, start_idx, shard_size).contiguous()
+        weight = weight.narrow(output_dim, start_idx, shard_size).contiguous()
 
         param.set_data(tensor_torch2ms(weight))
         return None
@@ -165,7 +165,7 @@ class QKVParallelLinear(ColParallelLinear):
             param.set_data(tensor_torch2ms(weight))
             return None
 
-        copy_dim = 0
+        output_dim = getattr(param, "output_dim", None)
         tp_rank = get_tensor_model_parallel_rank()
 
         shard_offset, shard_size = self.get_shard_offset_and_size(shard_id=shard_id)
@@ -176,16 +176,8 @@ class QKVParallelLinear(ColParallelLinear):
             shard_idx = tp_rank // self.num_kv_head_replicas
         start_idx = shard_idx * shard_size
 
-        weight = weight.narrow(copy_dim, start_idx, shard_size).contiguous()
+        weight = weight.narrow(output_dim, start_idx, shard_size).contiguous()
         param[shard_offset : shard_offset + shard_size, ...] = tensor_torch2ms(weight)
-        # if param.name.endswith(".weight"):
-        #     self.weight[shard_offset : shard_offset + shard_size, :] = tensor_torch2ms(
-        #         weight
-        #     )
-        # if param.name.endswith(".bias"):
-        #     self.bias[shard_offset : shard_offset + shard_size] = tensor_torch2ms(
-        #         weight
-        #     )
 
 
 class MLPColParallelLinear(ColParallelLinear):
@@ -227,22 +219,23 @@ class MLPColParallelLinear(ColParallelLinear):
         shard_idx = self._get_shard_idx(shard_id=shard_id)
         assert shard_idx != -1
 
-        copy_dim = 0
-
         tp_rank = get_tensor_model_parallel_rank()
         tp_size = get_tensor_model_parallel_world_size()
-        if copy_dim is not None and shard_idx is not None:
+        output_dim = getattr(param, "output_dim", None)
+        if output_dim is not None and shard_idx is not None:
             assert shard_idx < len(self.output_sizes)
             shard_offset = sum(self.output_sizes[:shard_idx]) // tp_size
             shard_size = self.output_sizes[shard_idx] // tp_size
             param_data = param.data
-            param_data = param_data.narrow(copy_dim, shard_offset, shard_size)
+            param_data = param_data.narrow(output_dim, shard_offset, shard_size)
             start_idx = tp_rank * shard_size
-            weight = weight.narrow(copy_dim, start_idx, shard_size).contiguous()
+            weight = weight.narrow(output_dim, start_idx, shard_size).contiguous()
             assert param_data.shape == weight.shape
             param[shard_offset : shard_offset + shard_size, ...] = tensor_torch2ms(
                 weight
             )
+        else:
+            param.set_data(tensor_torch2ms(weight))
 
 
 class RowParallelLinear(LinearBase):
@@ -301,10 +294,10 @@ class RowParallelLinear(LinearBase):
 
     def weight_load(self, param: Tensor, weight: torch.Tensor) -> None:
         if weight.dim() > 1 and weight.shape[1] > 1:
-            copy_dim = 1
-            shard_size = param.shape[copy_dim]
+            input_dim = getattr(param, "input_dim", 1)
+            shard_size = param.shape[input_dim]
             start_idx = self.tp_rank * shard_size
-            weight = weight.narrow(copy_dim, start_idx, shard_size).contiguous()
+            weight = weight.narrow(input_dim, start_idx, shard_size).contiguous()
 
         param.set_data(tensor_torch2ms(weight))
         return None

@@ -27,6 +27,7 @@ from sgl_mindspore.layers import (
     VocabParallelEmbedding,
     yarn_get_mscale,
 )
+from sgl_mindspore.layers.quantization.base_config import get_ms_quant_config
 from sgl_mindspore.models.mindspore_model_base import MindSporeModelBase
 from sgl_mindspore.utils import _get_tp_group_name, set_weight_attrs, tensor_torch2ms
 
@@ -668,8 +669,11 @@ class DeepseekV3ForCausalLM(MindSporeModelBase):
     ) -> None:
         super().__init__()
         self.config = config
+        quant_config = get_ms_quant_config(quant_config)
+        quant_config.packed_modules_mapping = packed_modules_mapping
         setattr(self.config, "param_dtype", dtype.bfloat16)
         self.prev_prefill = False
+        self.key_cache = []
 
         self.model = DeepseekV3Model(self.config, quant_config, "model")
 
@@ -681,7 +685,6 @@ class DeepseekV3ForCausalLM(MindSporeModelBase):
             quant_config=quant_config,
             prefix="lm_head",
         )
-
         self.all_gather = GatherLastDim()
 
         os.environ["MS_INTERNAL_DISABLE_CUSTOM_KERNEL_LIST"] = (
@@ -879,5 +882,36 @@ class DeepseekV3ForCausalLM(MindSporeModelBase):
         logits = mint.reshape(logits, (-1, logits.shape[-1]))
         return logits
 
+    def prepare_inputs(self, forward_batch, model_inputs):
+        if not self.key_cache:
+            self.key_cache = [
+                tensor_torch2ms(
+                    torch.cat(forward_batch.token_to_kv_pool.get_kv_buffer(idx), dim=-1)
+                )
+                for idx in range(self.config.num_hidden_layers)
+            ]
+
+        key_cache = mutable(self.key_cache)
+
+        page_size = forward_batch.token_to_kv_pool.page_size
+        block_tables = model_inputs["block_tables"]
+
+        block_table_max_page = mint.max(block_tables).asnumpy()
+        kv_page_nums = forward_batch.token_to_kv_pool.size // page_size
+        if block_table_max_page > kv_page_nums:
+            # sync for avoiding PagedAttention kv cache out of index
+            import torch_npu
+
+            torch_npu.npu.synchronize()
+
+        model_inputs["key_cache"] = key_cache
+        return model_inputs
+
+
+packed_modules_mapping = {
+    "gate_up_proj": ["gate_proj", "up_proj"],
+    "experts":
+    ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+}
 
 EntryClass = DeepseekV3ForCausalLM
