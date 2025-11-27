@@ -2,6 +2,11 @@ from typing import List, Optional
 
 import mindspore as ms
 from mindspore.ops.operations._infer_ops import QuantV2
+from mindspore.ops.auto_generate import (
+    WeightQuantBatchMatmul,
+    QuantBatchMatmul,
+    DynamicQuantExt,
+)
 from sglang.srt.layers.quantization.base_config import LinearMethodBase
 from sglang.srt.layers.quantization.w8a8_int8 import W8A8Int8Config
 
@@ -39,12 +44,12 @@ class MsW8A8Int8Config(W8A8Int8Config):
                 self.quant_description[prefix_in_quant_config + ".weight"]
                 == "W8A8_DYNAMIC"
             )
-            assert (
-                not self.is_dynamic
-            ), "Dynamic quantization is not supported in Mindspore models yet."
+            assert not self.is_dynamic, (
+                "Dynamic quantization is not supported in Mindspore models yet."
+            )
             if self.is_layer_skipped(prefix, packed_modules_mapping_subset):
                 return UnquantizedLinearMethod()
-            return MSW8A8LinearMethod(self)
+            return MSW8A8DynamicLinearMethod(self) if self.is_dynamic else MSW8A8LinearMethod(self)
         return None
 
 
@@ -111,7 +116,7 @@ class MSW8A8LinearMethod(LinearMethodBase):
             set_weight_attrs(param, extra_weight_attrs)
             layer.insert_param_to_cell(name, param)
 
-        self.matmul = ms.ops.auto_generate.QuantBatchMatmul(
+        self.matmul = QuantBatchMatmul(
             transpose_x1=False, transpose_x2=True, dtype=params_dtype
         )
         self.quant = QuantV2()
@@ -128,7 +133,6 @@ class MSW8A8LinearMethod(LinearMethodBase):
         x: ms.Tensor,
         bias: Optional[ms.Tensor] = None,
     ) -> ms.Tensor:
-
         original_dtype = x.dtype
         if original_dtype != ms.int8:
             x = x.to(layer.input_scale.dtype)
@@ -159,3 +163,61 @@ class MSW8A8LinearMethod(LinearMethodBase):
         if bias is not None:
             output = output + bias
         return output
+
+
+class MSW8A8DynamicLinearMethod(LinearMethodBase):
+    def __init__(self, quantization_config: W8A8Int8Config) -> None:
+        self.quantization_config = quantization_config
+
+    def create_weights(
+        self,
+        layer: ms.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: List[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: ms.dtype,
+        **extra_weight_attrs,
+    ) -> None:
+        output_size_per_partition = sum(output_partition_sizes)
+        q_weight_dict = {
+            "weight": ms.mint.zeros(
+                (sum(output_partition_sizes), input_size_per_partition), dtype=ms.int8
+            ),
+            "weight_scale": ms.mint.zeros(
+                [output_size_per_partition, 1], dtype=params_dtype
+            ),
+            "weight_offset": ms.mint.zeros(
+                [output_size_per_partition, 1], dtype=params_dtype
+            ),
+        }
+
+        for name, data in q_weight_dict.items():
+            param = ms.Parameter(data, requires_grad=False)
+            set_weight_attrs(param, {"input_dim": 1, "output_dim": 0})
+            set_weight_attrs(param, extra_weight_attrs)
+            layer.insert_param_to_cell(name, param)
+
+        self.dynamic_quant = DynamicQuantExt()
+        self.matmul = QuantBatchMatmul(
+            transpose_x1=False, transpose_x2=True, dtype=params_dtype
+        )
+
+    def process_weights_after_loading(self, layer: ms.nn.Module) -> None:
+        pass
+
+    def apply(
+        self,
+        layer: ms.nn.Module,
+        x: ms.Tensor,
+        bias: Optional[ms.Tensor] = None,
+    ) -> ms.Tensor:
+        qx, x_scale = self.dynamic_quant(x)
+        return self.matmul(
+            qx,
+            layer.weight,
+            layer.weight_scale,
+            None,
+            None,
+            x_scale,
+        )
