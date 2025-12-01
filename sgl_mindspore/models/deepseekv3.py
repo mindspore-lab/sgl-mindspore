@@ -8,6 +8,7 @@ from typing import Iterable, List, Optional, Tuple
 import mindspore.common.dtype as mstype
 import torch
 from mindspore import Parameter, Tensor, dtype, jit, mint, mutable, nn, ops
+from mindspore.ops.function.array_func import split_ext
 from sglang.srt.distributed import get_tensor_model_parallel_world_size
 from sglang.srt.distributed.utils import divide
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
@@ -388,13 +389,13 @@ class DeepseekV3AttentionMLA(nn.Cell):
 
         # calculate k(v)
         latent_kv_all = self.kv_a_proj_with_mqa(hidden_states)
-        latent_kv, k_pe = mint.split(
+        latent_kv, k_pe = split_ext(
             latent_kv_all, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
         )
         i_kv = self.kv_a_layernorm(latent_kv)
 
         # q， k rope
-        q_nope, q_pe = mint.split(
+        q_nope, q_pe = split_ext(
             q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
         )
         q_pe = q_pe.view((-1, self.local_num_heads * self.qk_rope_head_dim))
@@ -539,14 +540,12 @@ class DeepseekV3DecoderLayer(nn.Cell):
             norm_dim=config.hidden_size,
             eps=config.rms_norm_eps,
             param_dtype=config.param_dtype,
-            quant_config=quant_config,
             prefix=f"{prefix}.input_layernorm",
         )
         self.post_attention_layernorm = RMSNorm(
             norm_dim=config.hidden_size,
             eps=config.rms_norm_eps,
             param_dtype=config.param_dtype,
-            quant_config=quant_config,
             prefix=f"{prefix}.post_attention_layernorm",
         )
 
@@ -908,10 +907,13 @@ class DeepseekV3ForCausalLM(MindSporeModelBase):
         return model_inputs
 
 
-packed_modules_mapping = {
-    "gate_up_proj": ["gate_proj", "up_proj"],
-    "experts":
-    ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+packed_modules_mapping = {"model": {
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "experts":
+        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+        "kv_b_proj_v": ["kv_b_proj"],
+        "kv_b_proj_k": ["kv_b_proj"],
+    }
 }
 
 EntryClass = DeepseekV3ForCausalLM

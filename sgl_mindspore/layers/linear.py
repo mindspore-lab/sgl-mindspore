@@ -94,11 +94,12 @@ class ColParallelLinear(LinearBase):
         return x
 
     def weight_load(self, param: Tensor, weight: torch.Tensor) -> None:
-        tp_rank = get_tensor_model_parallel_rank()
-        output_dim = getattr(param, "output_dim", 0)
-        shard_size = param.shape[output_dim]
-        start_idx = tp_rank * shard_size
-        weight = weight.narrow(output_dim, start_idx, shard_size).contiguous()
+        if weight.numel() > 1:
+            tp_rank = get_tensor_model_parallel_rank()
+            output_dim = getattr(param, "output_dim", 0)
+            shard_size = param.shape[output_dim]
+            start_idx = tp_rank * shard_size
+            weight = weight.narrow(output_dim, start_idx, shard_size).contiguous()
 
         param.set_data(tensor_torch2ms(weight))
         return None
