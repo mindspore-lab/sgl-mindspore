@@ -14,12 +14,12 @@
 
 ## 安装
 
-这是一个分步指南，帮助您在 SGLang 中运行 MindSpore 模型。
+我们会一步步指引，帮助您在SGLang中运行MindSpore模型。
 
 ### 1. 安装 CANN
 
 请安装 8.3.RC1 社区版：[https://www.hiascend.com/developer/download/community/result?module=cann&cann=8.3.RC1]
-包括toolkit, kernels和nnal。请根据您的NPU选择合适的软件包。
+需要安装的软件包包括toolkit, kernels和nnal。请根据您的NPU型号选择合适的软件包。
 
 ### 2. 安装基于Ascend平台的SGLang
 
@@ -32,7 +32,7 @@ pip install -e "python[all_npu]"
 
 ### 3. 安装 sgl-kernel-npu
 
-此步骤需要 GCC 版本 >= 9。您可以使用 `gcc -v` 检查 GCC 版本。如果版本低于 9，请安装更新的版本。
+此步骤需要GCC版本 >= 9。您可以使用 `gcc -v` 检查GCC版本。如果版本低于9，请安装更新的版本。
 
 ```
 git clone https://github.com/sgl-project/sgl-kernel-npu.git
@@ -41,7 +41,7 @@ bash build.sh -a kernels
 pip install output/*.whl
 ```
 
-### 4. 安装 MindSpore 模型存储库
+### 4. 安装 MindSpore 模型仓库
 ```
 git clone https://github.com/mindspore-lab/sgl-mindspore.git
 cd sgl-mindspore
@@ -66,9 +66,20 @@ python examples/offline_infer.py --model-path /path/to/your/model
 
 ### 服务器推理演示：
 
+此脚本使用Python启动SGLang server，并发送一个样例请求。
 ```
 python examples/server_infer.py --model-path /path/to/your/model
 ```
+
+也可以使用bash脚本启动服务，并使用curl命令发送请求：
+```
+bash examples/start_server.sh
+```
+请求格式请参阅[SGLang官方文档](https://docs.sglang.io/basic_usage/send_request.html#Using-cURL).
+
+### 性能测试
+
+
 
 ## 许可证
 

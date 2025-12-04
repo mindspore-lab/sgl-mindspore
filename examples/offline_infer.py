@@ -5,9 +5,7 @@ import sglang as sgl
 parser = argparse.ArgumentParser("sglang-mindspore offline infer")
 
 parser.add_argument(
-    "--model_path,",
-    metavar="--model_path",
-    dest="model_path",
+    "--model-path",
     required=False,
     default="/home/ckpt/Qwen3-8B",
     help="the model path",
@@ -34,7 +32,7 @@ def main():
         "请介绍一下MindSpore。",
     ]
 
-    sampling_params = {"temperature": 0.01, "top_p": 0.9}
+    sampling_params = {"temperature": 0, "top_p": 0.9}
 
     outputs = llm.generate(prompts, sampling_params)
     for prompt, output in zip(prompts, outputs):

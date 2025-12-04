@@ -18,12 +18,10 @@ classifiers = [
 ]
 requires-python = ">=3.10"
 dependencies = [
-    # Add your dependencies here
     "mindspore==2.7.2",
     "torch==2.8.0",
     "torch_npu==2.8.0",
     "torchvision",
     "triton-ascend",
     "pybind11",
-    "sglang",
 ]

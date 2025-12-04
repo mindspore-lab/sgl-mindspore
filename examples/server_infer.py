@@ -36,7 +36,8 @@ def main():
     wait_for_server(f"http://localhost:{port}")
 
     url = f"http://localhost:{port}/generate"
-    data = {"text": "Please introduce what MindSpore is."}
+    data = {"text": "The capital of France is",
+            "sampling_params": {"temperature": 0, "max_new_tokens": 100}}
 
     response = requests.post(url, json=data)
     print_highlight(response.json())
