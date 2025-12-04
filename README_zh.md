@@ -52,8 +52,8 @@ pip install -e .
 
 运行前请设置以下环境变量：
 ```
-export ASCEND_RT_VISIBLE_DEVICES=0  # NPU 设备 ID
-export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python  # 避免 protobuf 版本不匹配
+export ASCEND_RT_VISIBLE_DEVICES=0  # NPU设备ID
+export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python  # 避免protobuf版本不匹配
 ```
 
 ### 离线推理演示：
@@ -64,7 +64,7 @@ python examples/offline_infer.py --model-path /path/to/your/model
 
 要启用数据或张量并行，请修改以上脚本中的 `dp_size` 和 `tp_size`。
 
-### 服务器推理演示：
+### 服务化推理演示：
 
 此脚本使用Python启动SGLang server，并发送一个样例请求。
 ```
@@ -79,7 +79,10 @@ bash examples/start_server.sh
 
 ### 性能测试
 
-
+测试单个batch的推理性能：
+```
+bash examples/bench_one_batch.sh
+```
 
 ## 许可证
 
