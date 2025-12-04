@@ -610,16 +610,15 @@ class DeepseekV3ForCausalLM(MindSporeModelBase):
         self.config = config
         setattr(self.config, "param_dtype", dtype.bfloat16)
         self.prev_prefill = False
+        self.key_cache = []
 
         self.model = DeepseekV3Model(self.config)
-
         self.lm_head = ColParallelLinear(
             input_size=self.config.hidden_size,
             output_size=self.config.vocab_size,
             param_dtype=self.config.param_dtype,
             bias=False,
         )
-
         self.all_gather = GatherLastDim()
 
         os.environ["MS_INTERNAL_DISABLE_CUSTOM_KERNEL_LIST"] = (
@@ -816,6 +815,31 @@ class DeepseekV3ForCausalLM(MindSporeModelBase):
         logits = ops.cast(logits, dtype.float32)
         logits = mint.reshape(logits, (-1, logits.shape[-1]))
         return logits
+
+    def prepare_inputs(self, forward_batch, model_inputs):
+        if not self.key_cache:
+            self.key_cache = [
+                tensor_torch2ms(
+                    torch.cat(forward_batch.token_to_kv_pool.get_kv_buffer(idx), dim=-1)
+                )
+                for idx in range(self.config.num_hidden_layers)
+            ]
+
+        key_cache = mutable(self.key_cache)
+
+        page_size = forward_batch.token_to_kv_pool.page_size
+        block_tables = model_inputs["block_tables"]
+
+        block_table_max_page = mint.max(block_tables).asnumpy()
+        kv_page_nums = forward_batch.token_to_kv_pool.size // page_size
+        if block_table_max_page > kv_page_nums:
+            # sync for avoiding PagedAttention kv cache out of index
+            import torch_npu
+
+            torch_npu.npu.synchronize()
+
+        model_inputs["key_cache"] = key_cache
+        return model_inputs
 
 
 EntryClass = DeepseekV3ForCausalLM
