@@ -8,11 +8,10 @@ from mindspore.ops.auto_generate import (
     DynamicQuantExt,
     GroupedMatmulV4,
     QuantBatchMatmul,
-    WeightQuantBatchMatmul,
 )
 from mindspore.ops.operations._infer_ops import QuantV2
+from sglang.srt.hardware_backend.npu.quantization.modelslim import ModelSlimConfig
 from sglang.srt.layers.quantization.base_config import LinearMethodBase
-from sglang.srt.layers.quantization.w8a8_int8 import W8A8Int8Config
 
 from sgl_mindspore.layers.linear import RowParallelLinear
 from sgl_mindspore.layers.moe.fused_moe import FusedMoe
@@ -21,8 +20,8 @@ from sgl_mindspore.layers.quantization.unquant import UnquantizedLinearMethod
 from sgl_mindspore.utils import set_weight_attrs
 
 
-class MsW8A8Int8Config(W8A8Int8Config):
-    def __init__(self, quant_config: W8A8Int8Config):
+class MsModelSlimConfig(ModelSlimConfig):
+    def __init__(self, quant_config: ModelSlimConfig):
         super().__init__(quant_config.quant_description)
 
     def get_quant_method(
@@ -72,7 +71,7 @@ class MSW8A8LinearMethod(LinearMethodBase):
         quant_config: The NPU quantization config.
     """
 
-    def __init__(self, quantization_config: W8A8Int8Config) -> None:
+    def __init__(self, quantization_config: ModelSlimConfig) -> None:
         self.quantization_config = quantization_config
 
     def create_weights(
@@ -177,7 +176,7 @@ class MSW8A8LinearMethod(LinearMethodBase):
 
 
 class MSW8A8DynamicLinearMethod(LinearMethodBase):
-    def __init__(self, quantization_config: W8A8Int8Config) -> None:
+    def __init__(self, quantization_config: ModelSlimConfig) -> None:
         self.quantization_config = quantization_config
 
     def create_weights(
@@ -244,7 +243,7 @@ class MSW8A8FusedMoEFFNMethod(QuantizeMethodBase):
         quant_config: The NPU quantization config.
     """
 
-    def __init__(self, quantization_config: W8A8Int8Config) -> None:
+    def __init__(self, quantization_config: ModelSlimConfig) -> None:
         self.quantization_config = quantization_config
 
     def create_weights(

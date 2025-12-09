@@ -2,8 +2,8 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import mindspore as ms
+from sglang.srt.hardware_backend.npu.quantization.modelslim import ModelSlimConfig
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
-from sglang.srt.layers.quantization.w8a8_int8 import W8A8Int8Config
 
 
 class QuantizeMethodBase(ABC):
@@ -73,12 +73,12 @@ class LinearMethodBase(QuantizeMethodBase):
 
 
 def get_ms_quant_config(quant_config: QuantizationConfig) -> QuantizeMethodBase:
-    from sgl_mindspore.layers.quantization.w8a8_int8 import MsW8A8Int8Config
+    from sgl_mindspore.layers.quantization.w8a8_int8 import MsModelSlimConfig
 
     if quant_config is None:
         return None
 
-    if isinstance(quant_config, W8A8Int8Config):
-        return MsW8A8Int8Config(quant_config)
+    if isinstance(quant_config, ModelSlimConfig):
+        return MsModelSlimConfig(quant_config)
     else:
         raise ValueError(f"Unknown quant config: {quant_config}")
