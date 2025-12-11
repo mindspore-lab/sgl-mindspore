@@ -8,6 +8,7 @@ from typing import Iterable, List, Optional, Tuple
 import mindspore.common.dtype as mstype
 import torch
 from mindspore import Parameter, Tensor, dtype, jit, mint, mutable, nn, ops
+from mindspore.ops.function.array_func import split_ext
 from sglang.srt.distributed import get_tensor_model_parallel_world_size
 from sglang.srt.distributed.utils import divide
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
@@ -72,6 +73,8 @@ class DeepseekV3MLP(nn.Cell):
         intermediate_size,
         param_dtype,
         reduce_results: bool = True,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -84,6 +87,8 @@ class DeepseekV3MLP(nn.Cell):
             param_dtype=self.param_dtype,
             bias=False,
             output_sizes=[self.intermediate_size] * 2,
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj",
         )
         self.down_proj = RowParallelLinear(
             input_size=intermediate_size,
@@ -91,6 +96,8 @@ class DeepseekV3MLP(nn.Cell):
             param_dtype=param_dtype,
             bias=False,
             reduce_results=reduce_results,
+            quant_config=quant_config,
+            prefix=f"{prefix}.down_proj",
         )
         self.act_fn = SwiGLU()
 
@@ -102,7 +109,12 @@ class DeepseekV3MLP(nn.Cell):
 
 
 class DeepseekV3MOE(nn.Cell):
-    def __init__(self, config) -> None:
+    def __init__(
+        self,
+        config,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
 
         self.n_routed_experts = config.n_routed_experts
@@ -114,6 +126,8 @@ class DeepseekV3MOE(nn.Cell):
             output_size=config.n_routed_experts,
             bias=False,
             param_dtype=config.param_dtype,
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate",
         )
         self.gate.e_score_correction_bias = Parameter(
             mint.zeros((self.n_routed_experts), dtype=mstype.float32),
@@ -142,6 +156,8 @@ class DeepseekV3MOE(nn.Cell):
             scoring_func=config.scoring_func,
             e_score_correction_bias=self.gate.e_score_correction_bias,
             num_redundant_experts=self.num_redundant_experts,
+            quant_config=quant_config,
+            prefix=f"{prefix}.experts",
         )
 
         if config.n_shared_experts:
@@ -151,6 +167,8 @@ class DeepseekV3MOE(nn.Cell):
                 intermediate_size=intermediate_size,
                 param_dtype=config.param_dtype,
                 reduce_results=self.experts.must_reduce_shared_expert_outputs(),
+                quant_config=quant_config,
+                prefix=f"{prefix}.shared_experts",
             )
 
     def construct(self, hidden_states: Tensor):
@@ -176,7 +194,12 @@ class DeepseekV3MOE(nn.Cell):
 
 
 class DeepseekV3AttentionMLA(nn.Cell):
-    def __init__(self, config) -> None:
+    def __init__(
+        self,
+        config,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
         self.hidden_size = config.hidden_size
@@ -253,12 +276,15 @@ class DeepseekV3AttentionMLA(nn.Cell):
             output_size=self.q_lora_rank,
             bias=False,
             param_dtype=config.param_dtype,
+            quant_config=quant_config,
+            prefix=f"{prefix}.q_a_proj",
         )
 
         self.q_a_layernorm = RMSNorm(
             norm_dim=self.q_lora_rank,
             eps=config.rms_norm_eps,
             param_dtype=config.param_dtype,
+            prefix=f"{prefix}.q_a_layernorm",
         )
 
         # transpose weight avoiding transposition operation
@@ -267,6 +293,8 @@ class DeepseekV3AttentionMLA(nn.Cell):
             output_size=self.total_num_heads * self.q_head_dim,
             param_dtype=config.param_dtype,
             bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.q_b_proj",
         )
         set_weight_attrs(
             self.q_b_proj.weight,
@@ -286,6 +314,8 @@ class DeepseekV3AttentionMLA(nn.Cell):
             output_size=self.kv_head_dim,
             param_dtype=config.param_dtype,
             bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.kv_a_proj_with_mqa",
         )
         set_weight_attrs(
             self.kv_a_proj_with_mqa.weight,
@@ -304,6 +334,7 @@ class DeepseekV3AttentionMLA(nn.Cell):
             norm_dim=self.kv_lora_rank,
             eps=config.rms_norm_eps,
             param_dtype=config.param_dtype,
+            prefix=f"{prefix}.kv_a_layernorm",
         )
 
         self.kv_b_proj_k = ColParallelLinear(
@@ -311,6 +342,8 @@ class DeepseekV3AttentionMLA(nn.Cell):
             output_size=self.total_num_heads * self.qk_nope_head_dim,
             param_dtype=config.param_dtype,
             bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.kv_b_proj_k",
         )
 
         self.kv_b_proj_v = ColParallelLinear(
@@ -318,6 +351,8 @@ class DeepseekV3AttentionMLA(nn.Cell):
             output_size=self.total_num_heads * self.v_head_dim,
             param_dtype=config.param_dtype,
             bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.kv_b_proj_v",
         )
 
         self.o_proj = RowParallelLinear(
@@ -325,6 +360,8 @@ class DeepseekV3AttentionMLA(nn.Cell):
             output_size=self.hidden_size,
             param_dtype=config.param_dtype,
             bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
         )
 
         self.tile_kv = ops.Tile()
@@ -351,13 +388,13 @@ class DeepseekV3AttentionMLA(nn.Cell):
 
         # calculate k(v)
         latent_kv_all = self.kv_a_proj_with_mqa(hidden_states)
-        latent_kv, k_pe = mint.split(
+        latent_kv, k_pe = split_ext(
             latent_kv_all, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
         )
         i_kv = self.kv_a_layernorm(latent_kv)
 
         # q， k rope
-        q_nope, q_pe = mint.split(
+        q_nope, q_pe = split_ext(
             q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
         )
         q_pe = q_pe.view((-1, self.local_num_heads * self.qk_rope_head_dim))
@@ -469,34 +506,46 @@ class DeepseekV3AttentionMLA(nn.Cell):
 
 
 class DeepseekV3DecoderLayer(nn.Cell):
-    def __init__(self, config, layer_idx: int) -> None:
+    def __init__(
+        self,
+        config,
+        layer_idx: int,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
 
         self.hidden_size = config.hidden_size
         self.layer_idx = layer_idx
-        self.self_attn = DeepseekV3AttentionMLA(config)
+        self.self_attn = DeepseekV3AttentionMLA(
+            config, quant_config, prefix=f"{prefix}.self_attn"
+        )
 
         if (
             config.n_routed_experts is not None
             and layer_idx >= config.first_k_dense_replace
             and layer_idx % config.moe_layer_freq == 0
         ):
-            self.mlp = DeepseekV3MOE(config)
+            self.mlp = DeepseekV3MOE(config, quant_config, f"{prefix}.mlp")
         else:
             self.mlp = DeepseekV3MLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.intermediate_size,
                 param_dtype=config.param_dtype,
+                quant_config=quant_config,
+                prefix=f"{prefix}.mlp",
             )
         self.input_layernorm = RMSNorm(
             norm_dim=config.hidden_size,
             eps=config.rms_norm_eps,
             param_dtype=config.param_dtype,
+            prefix=f"{prefix}.input_layernorm",
         )
         self.post_attention_layernorm = RMSNorm(
             norm_dim=config.hidden_size,
             eps=config.rms_norm_eps,
             param_dtype=config.param_dtype,
+            prefix=f"{prefix}.post_attention_layernorm",
         )
 
     def construct(
@@ -536,7 +585,12 @@ class DeepseekV3DecoderLayer(nn.Cell):
 
 
 class DeepseekV3Model(nn.Cell):
-    def __init__(self, config) -> None:
+    def __init__(
+        self,
+        config,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
         self.num_hidden_layers = config.num_hidden_layers
 
@@ -544,11 +598,16 @@ class DeepseekV3Model(nn.Cell):
 
         self.layers = nn.CellList()
         for layer_idx in range(self.num_hidden_layers):
-            layer = DeepseekV3DecoderLayer(config, layer_idx)
+            layer = DeepseekV3DecoderLayer(
+                config, layer_idx, quant_config, f"{prefix}.layers.{layer_idx}"
+            )
             self.layers.append(layer)
 
         self.norm = RMSNorm(
-            config.hidden_size, config.rms_norm_eps, param_dtype=config.param_dtype
+            config.hidden_size,
+            config.rms_norm_eps,
+            param_dtype=config.param_dtype,
+            prefix=f"{prefix}.norm",
         )
 
     @jit
@@ -612,12 +671,15 @@ class DeepseekV3ForCausalLM(MindSporeModelBase):
         self.prev_prefill = False
         self.key_cache = []
 
-        self.model = DeepseekV3Model(self.config)
+        self.model = DeepseekV3Model(self.config, quant_config, "model")
+
         self.lm_head = ColParallelLinear(
             input_size=self.config.hidden_size,
             output_size=self.config.vocab_size,
             param_dtype=self.config.param_dtype,
             bias=False,
+            quant_config=quant_config,
+            prefix="lm_head",
         )
         self.all_gather = GatherLastDim()
 
@@ -841,5 +903,14 @@ class DeepseekV3ForCausalLM(MindSporeModelBase):
         model_inputs["key_cache"] = key_cache
         return model_inputs
 
+
+packed_modules_mapping = {
+    "model": {
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+        "kv_b_proj_v": ["kv_b_proj"],
+        "kv_b_proj_k": ["kv_b_proj"],
+    }
+}
 
 EntryClass = DeepseekV3ForCausalLM

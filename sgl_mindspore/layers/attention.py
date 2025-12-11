@@ -61,7 +61,7 @@ class MsNativeAttnBackend(nn.Cell):
             if k_scale is not None:
                 key = key / k_scale
             key = key.to(key_cache.dtype)
-        if value.dtype != value_cache.dtype:
+        if value is not None and value.dtype != value_cache.dtype:
             if v_scale is not None:
                 value = value / v_scale
             value = value.to(value_cache.dtype)
