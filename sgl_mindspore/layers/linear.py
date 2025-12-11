@@ -56,6 +56,8 @@ class ColParallelLinear(LinearBase):
         param_dtype: Optional[ms.dtype] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        tp_rank: Optional[int] = None,
+        tp_size: Optional[int] = None,
     ) -> None:
         super().__init__(
             input_size=input_size,
@@ -65,8 +67,12 @@ class ColParallelLinear(LinearBase):
             quant_config=quant_config,
             prefix=prefix,
         )
-
-        self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_size = (
+            tp_size if tp_size is not None else get_tensor_model_parallel_world_size()
+        )
+        self.tp_rank = (
+            tp_rank if tp_rank is not None else get_tensor_model_parallel_rank()
+        )
         self.param_dtype = param_dtype
         self.input_size = input_size
         self.output_size = output_size // self.tp_size
@@ -94,10 +100,9 @@ class ColParallelLinear(LinearBase):
         return x
 
     def weight_load(self, param: Tensor, weight: torch.Tensor) -> None:
-        tp_rank = get_tensor_model_parallel_rank()
         output_dim = getattr(param, "output_dim", 0)
         shard_size = param.shape[output_dim]
-        start_idx = tp_rank * shard_size
+        start_idx = self.tp_rank * shard_size
         weight = weight.narrow(output_dim, start_idx, shard_size).contiguous()
 
         param.set_data(tensor_torch2ms(weight))
@@ -115,6 +120,8 @@ class QKVParallelLinear(ColParallelLinear):
         param_dtype: Optional[Type] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        tp_rank: Optional[int] = None,
+        tp_size: Optional[int] = None,
     ) -> None:
         self.hidden_size = hidden_size
         self.head_dim = head_dim
@@ -123,18 +130,21 @@ class QKVParallelLinear(ColParallelLinear):
             total_num_kv_heads = total_num_heads
         self.total_num_kv_head = total_num_kv_heads
 
-        tp_size = get_tensor_model_parallel_world_size()
+        if tp_rank is None:
+            tp_rank = get_tensor_model_parallel_rank()
+        if tp_size is None:
+            tp_size = get_tensor_model_parallel_world_size()
         self.num_heads = divide(self.total_num_heads, tp_size)
 
         if tp_size > self.total_num_kv_head:
-            logger.error(
-                f"current not support kv_head {self.total_num_kv_head} less than tp_size {tp_size}"
-            )
+            assert tp_size % self.total_num_kv_head == 0
+            self.num_kv_heads = 1
+            self.num_kv_head_replicas = divide(tp_size, self.total_num_kv_head)
         else:
             self.num_kv_heads = divide(self.total_num_kv_head, tp_size)
             self.num_kv_head_replicas = 1
         input_size = self.hidden_size
-        output_size = (self.num_heads + 2 * self.num_kv_heads) * tp_size * self.head_dim
+        output_size = ( self.num_heads + 2 * self.num_kv_heads ) * tp_size * self.head_dim
 
         super().__init__(
             input_size=input_size,
@@ -143,6 +153,8 @@ class QKVParallelLinear(ColParallelLinear):
             param_dtype=param_dtype,
             quant_config=quant_config,
             prefix=prefix,
+            tp_rank=tp_rank,
+            tp_size=tp_size,
         )
 
     def get_shard_offset_and_size(self, shard_id: str):
@@ -166,7 +178,7 @@ class QKVParallelLinear(ColParallelLinear):
             return None
 
         output_dim = getattr(param, "output_dim", None)
-        tp_rank = get_tensor_model_parallel_rank()
+        tp_rank = self.tp_rank
 
         shard_offset, shard_size = self.get_shard_offset_and_size(shard_id=shard_id)
 
@@ -248,6 +260,8 @@ class RowParallelLinear(LinearBase):
         quant_config: Optional[QuantizationConfig] = None,
         reduce_results: bool = True,
         prefix: str = "",
+        tp_rank: Optional[int] = None,
+        tp_size: Optional[int] = None,
     ) -> None:
         super().__init__(
             input_size=input_size,
@@ -257,8 +271,12 @@ class RowParallelLinear(LinearBase):
             quant_config=quant_config,
             prefix=prefix,
         )
-
-        self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_size = (
+            tp_size if tp_size is not None else get_tensor_model_parallel_world_size()
+        )
+        self.tp_rank = (
+            tp_rank if tp_rank is not None else get_tensor_model_parallel_rank()
+        )
         self.param_dtype = param_dtype
         self.input_size = input_size // self.tp_size
         self.output_size = output_size
@@ -282,7 +300,6 @@ class RowParallelLinear(LinearBase):
             self.bias = Parameter(mint.zeros(self.output_size, dtype=self.param_dtype))
             setattr(self.bias, "weight_load", self.weight_load)
         tp_group_name = _get_tp_group_name()
-        self.tp_rank = get_tensor_model_parallel_rank()
         self.all_reduce = ops.AllReduce(group=tp_group_name)
 
     def construct(self, input: Tensor) -> Tuple[Tensor, bool]:

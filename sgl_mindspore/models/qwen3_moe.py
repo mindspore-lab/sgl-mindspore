@@ -18,6 +18,7 @@ from sglang.srt.distributed import (
     get_tp_group,
 )
 from sglang.srt.distributed.utils import divide
+from sglang.srt.layers.dp_attention import get_attention_tp_rank, get_attention_tp_size
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 
 from sgl_mindspore.layers import (
@@ -131,16 +132,18 @@ class Qwen3MoeAttention(nn.Cell):
     def __init__(self, config) -> None:
         super().__init__()
 
+        attn_tp_rank = get_attention_tp_rank()
+        attn_tp_size = get_attention_tp_size()
+        self.attn_tp_size = attn_tp_size
         self.tp_size = get_tensor_model_parallel_world_size()
         self.hidden_size = config.hidden_size
-        self.num_heads = config.num_attention_heads
-        self.num_kv_heads = config.num_key_value_heads
+        self.total_num_heads = config.num_attention_heads
+        self.total_num_kv_heads = config.num_key_value_heads
+        assert self.total_num_heads % attn_tp_size == 0
         if hasattr(config, "head_dim"):
             self.head_dim = config.head_dim
         else:
-            self.head_dim = config.hidden_size // self.num_heads
-        self.q_size = self.head_dim * self.num_heads
-        self.kv_size = self.head_dim * self.num_kv_heads
+            self.head_dim = config.hidden_size // self.total_num_heads
         self.scaling = float(self.head_dim**-0.5)
         self.rope_theta = int(config.rope_theta)
         self.param_dtype = config.param_dtype
@@ -154,19 +157,34 @@ class Qwen3MoeAttention(nn.Cell):
         else:
             self.rope_type = "default_rope"
 
+        self.local_num_heads = self.total_num_heads // attn_tp_size
+        if self.total_num_kv_heads >= attn_tp_size:
+            assert self.total_num_kv_heads % attn_tp_size == 0
+            self.local_num_kv_heads = self.total_num_kv_heads // attn_tp_size
+        else:
+            assert attn_tp_size % self.total_num_kv_heads == 0
+            self.local_num_kv_heads = 1
+
+        self.local_q_size = self.local_num_heads * self.head_dim
+        self.local_kv_size = self.local_num_kv_heads * self.head_dim
+        self.q_size = self.total_num_heads * self.head_dim
+        self.kv_size = self.total_num_kv_heads * self.head_dim
+
         self.attn = MsNativeAttnBackend(
-            config.num_attention_heads // self.tp_size,
-            config.head_dim,
-            config.num_key_value_heads // self.tp_size,
+            self.local_num_heads,
+            self.head_dim,
+            self.local_num_kv_heads,
         )
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size=self.hidden_size,
             head_dim=self.head_dim,
-            total_num_heads=self.num_heads,
-            total_num_kv_heads=self.num_kv_heads,
+            total_num_heads=self.total_num_heads,
+            total_num_kv_heads=self.total_num_kv_heads,
             bias=config.attention_bias,
             param_dtype=self.param_dtype,
+            tp_rank=attn_tp_rank,
+            tp_size=attn_tp_size,
         )
         self.q_norm = RMSNorm(
             norm_dim=config.head_dim,
@@ -183,6 +201,8 @@ class Qwen3MoeAttention(nn.Cell):
             output_size=self.hidden_size,
             param_dtype=self.param_dtype,
             bias=config.attention_bias,
+            tp_rank=attn_tp_rank,
+            tp_size=attn_tp_size,
         )
         self.rotary_emb = None
         if self.rope_type == "yarn":
@@ -223,19 +243,19 @@ class Qwen3MoeAttention(nn.Cell):
         qkv = self.qkv_proj(hidden_state)
         q, k, v = qkv.split(
             [
-                self.q_size // self.tp_size,
-                self.kv_size // self.tp_size,
-                self.kv_size // self.tp_size,
+                self.local_q_size,
+                self.local_kv_size,
+                self.local_kv_size,
             ],
             dim=-1,
         )
 
         q = q.view(-1, self.head_dim).contiguous()
         k = k.view(-1, self.head_dim).contiguous()
-        v = v.view(-1, self.kv_size // self.tp_size).contiguous()
+        v = v.view(-1, self.local_kv_size).contiguous()
 
-        q = self.q_norm(q).view(-1, self.q_size // self.tp_size)
-        k = self.k_norm(k).view(-1, self.kv_size // self.tp_size)
+        q = self.q_norm(q).view(-1, self.local_q_size)
+        k = self.k_norm(k).view(-1, self.local_kv_size)
 
         q, k = self.rotary_emb(
             positions,
@@ -244,8 +264,6 @@ class Qwen3MoeAttention(nn.Cell):
             batch_valid_length=batch_valid_length,
             is_prefill=is_prefill,
         )
-
-        k = k.contiguous()
 
         key_out = self.attn(
             k,
