@@ -6,9 +6,7 @@ from sglang.utils import launch_server_cmd, print_highlight, wait_for_server
 parser = argparse.ArgumentParser("sglang-mindspore offline infer")
 
 parser.add_argument(
-    "--model_path,",
-    metavar="--model_path",
-    dest="model_path",
+    "--model-path,",
     required=False,
     default="/home/ckpt/Qwen3-8B",
     help="the model path",
