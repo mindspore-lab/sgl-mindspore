@@ -16,12 +16,12 @@
 
 我们会一步步指引，帮助您在SGLang中运行MindSpore模型。
 
-### 1. 安装 CANN
+### 1. 安装CANN
 
-请安装 8.3.RC1 社区版：[https://www.hiascend.com/developer/download/community/result?module=cann&cann=8.3.RC1]
+请安装社区版8.3.RC1或更高版本：[https://www.hiascend.com/developer/download/community/result?module=cann&cann=8.3.RC1]
 需要安装的软件包包括toolkit, kernels和nnal。请根据您的NPU型号选择合适的软件包。
 
-### 2. 安装基于Ascend平台的SGLang
+### 2. 基于昇腾平台，安装SGLang
 
 ```
 git clone https://github.com/sgl-project/sglang.git
@@ -30,9 +30,9 @@ cp python/pyproject_other.toml python/pyproject.toml
 pip install -e "python[all_npu]"
 ```
 
-### 3. 安装 sgl-kernel-npu
+### 3. 安装sgl-kernel-npu
 
-此步骤需要GCC版本 >= 9。您可以使用 `gcc -v` 检查GCC版本。如果版本低于9，请安装更新的版本。
+此步骤需要GCC版本>=9。您可以使用 `gcc -v` 检查GCC版本。如果版本低于9，请安装更新的版本。
 
 ```
 git clone https://github.com/sgl-project/sgl-kernel-npu.git
@@ -41,7 +41,7 @@ bash build.sh -a kernels
 pip install output/*.whl
 ```
 
-### 4. 安装 MindSpore 模型仓库
+### 4. 安装MindSpore模型仓库
 ```
 git clone https://github.com/mindspore-lab/sgl-mindspore.git
 cd sgl-mindspore

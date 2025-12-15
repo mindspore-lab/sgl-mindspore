@@ -18,7 +18,7 @@ This is a step-by-step guide helping you to run MindSpore models in SGLang.
 
 ### 1. Install CANN
 
-Please install the 8.3.RC1 community edition: [https://www.hiascend.com/developer/download/community/result?module=cann&cann=8.3.RC1]
+Please install the 8.3.RC1 (or higher) community edition: [https://www.hiascend.com/developer/download/community/result?module=cann&cann=8.3.RC1]
 
 The packages you need to install include toolkit, kernels and nnal. Please choose the appropriate packages according to your NPU type.
 
