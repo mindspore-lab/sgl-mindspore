@@ -11,15 +11,9 @@ from mindspore.ops.auto_generate import (
     MoeInitRoutingV2,
     MoeTokenUnpermute,
 )
-from sglang.srt.distributed import (
-    get_tensor_model_parallel_rank,
-)
+from sglang.srt.distributed import get_tensor_model_parallel_rank
 
-from sgl_mindspore.utils import (
-    _get_tp_group_name,
-    split_loaded_weight,
-    tensor_torch2ms,
-)
+from sgl_mindspore.utils import _get_tp_group_name, split_loaded_weight, tensor_torch2ms
 
 
 def fused_topk(
@@ -205,6 +199,8 @@ class FusedExperts(nn.Cell):
         gate, hidden = mint.split(
             gate_hidden_out, (w1.shape[2] // 2, w1.shape[2] // 2), -1
         )
+        gate = gate.contiguous()
+        hidden = hidden.contiguous()
         gate = self._gate_activation(gate=gate, activation=activation)
         hidden = mint.mul(hidden, gate)
         expert_output = self._group_matmul(

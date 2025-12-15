@@ -199,9 +199,9 @@ class Qwen3Attention(nn.Cell):
             dim=-1,
         )
 
-        q = q.view(-1, self.head_dim)
-        k = k.view(-1, self.head_dim)
-        v = v.view(-1, self.kv_size // self.tp_size)
+        q = q.view(-1, self.head_dim).contiguous()
+        k = k.view(-1, self.head_dim).contiguous()
+        v = v.view(-1, self.kv_size // self.tp_size).contiguous()
 
         q = self.q_norm(q).view(-1, self.q_size // self.tp_size)
         k = self.k_norm(k).view(-1, self.kv_size // self.tp_size)
