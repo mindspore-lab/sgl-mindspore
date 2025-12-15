@@ -907,10 +907,10 @@ class DeepseekV3ForCausalLM(MindSporeModelBase):
         return model_inputs
 
 
-packed_modules_mapping = {"model": {
+packed_modules_mapping = {
+    "model": {
         "gate_up_proj": ["gate_proj", "up_proj"],
-        "experts":
-        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+        "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
         "kv_b_proj_v": ["kv_b_proj"],
         "kv_b_proj_k": ["kv_b_proj"],
     }

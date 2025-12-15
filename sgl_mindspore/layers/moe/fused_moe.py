@@ -11,17 +11,11 @@ from mindspore.ops.auto_generate import (
     MoeInitRoutingV2,
     MoeTokenUnpermute,
 )
-from sglang.srt.distributed import (
-    get_tensor_model_parallel_rank,
-)
+from sglang.srt.distributed import get_tensor_model_parallel_rank
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 
-from sgl_mindspore.utils import (
-    _get_tp_group_name,
-    split_loaded_weight,
-    tensor_torch2ms,
-)
 from sgl_mindspore.layers.quantization.unquant import UnquantizedFusedMoEFFNMethod
+from sgl_mindspore.utils import _get_tp_group_name, split_loaded_weight, tensor_torch2ms
 
 
 def fused_topk(
@@ -420,7 +414,7 @@ class FusedMoe(nn.Cell):
             self.hidden_size,
             self.intermediate_size_per_partition,
             self.param_dtype,
-            extra_weight_attrs={"weight_load": self.weight_load, "is_transpose": True},
+            weight_load=self.weight_load,
         )
 
     def _load_w13(
@@ -454,15 +448,15 @@ class FusedMoe(nn.Cell):
 
         if shard_id == "w1":
             if is_param_transpose:
-                param[expert_id, :, 0:shard_size] = loaded_weight
+                param[expert_id, :, :shard_size] = loaded_weight
             else:
-                param[expert_id, 0:shard_size, :] = loaded_weight
+                param[expert_id, :shard_size, :] = loaded_weight
         else:
             assert shard_id == "w3"
             if is_param_transpose:
-                param[expert_id, :, shard_size : shard_size * 2] = loaded_weight
+                param[expert_id, :, shard_size:] = loaded_weight
             else:
-                param[expert_id, shard_size : shard_size * 2, :] = loaded_weight
+                param[expert_id, shard_size:, :] = loaded_weight
 
     def _load_w2(
         self,

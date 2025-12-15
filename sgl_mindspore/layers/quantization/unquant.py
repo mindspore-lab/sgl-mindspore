@@ -2,9 +2,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import mindspore as ms
 from mindspore import mint, ops
-from mindspore.ops.auto_generate import (
-    GroupedMatmulV4,
-)
+from mindspore.ops.auto_generate import GroupedMatmulV4
 from mindspore.ops.function.array_func import split_ext
 
 from sgl_mindspore.layers.quantization.base_config import (
@@ -112,19 +110,16 @@ class UnquantizedFusedMoEFFNMethod(QuantizeMethodBase):
         self.with_bias = with_bias
 
         # Fused gate_up_proj (column parallel)
-        w13_up_dim = (
-            2 * intermediate_size_per_partition
-            if layer.moe_runner_config.is_gated
-            else intermediate_size_per_partition
-        )
+        w13_up_dim = 2 * intermediate_size_per_partition
         w13_weight_n, w13_weight_k = (w13_up_dim, hidden_size)
 
         w13_weight = ms.Parameter(
-            mint.empty(num_experts, w13_weight_n, w13_weight_k, dtype=params_dtype),
+            mint.empty(num_experts, w13_weight_k, w13_weight_n, dtype=params_dtype),
             requires_grad=False,
         )
         layer.insert_param_to_cell("w13_weight", w13_weight)
         set_weight_attrs(w13_weight, extra_weight_attrs)
+        setattr(w13_weight, "is_transpose", True)
 
         if self.with_bias:
             w13_weight_bias = ms.Parameter(
@@ -141,11 +136,12 @@ class UnquantizedFusedMoEFFNMethod(QuantizeMethodBase):
         )
 
         w2_weight = ms.Parameter(
-            mint.empty(num_experts, w2_weight_n, w2_weight_k, dtype=params_dtype),
+            mint.empty(num_experts, w2_weight_k, w2_weight_n, dtype=params_dtype),
             requires_grad=False,
         )
         layer.insert_param_to_cell("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
+        setattr(w2_weight, "is_transpose", True)
 
         if self.with_bias:
             w2_weight_bias = ms.Parameter(
@@ -154,9 +150,9 @@ class UnquantizedFusedMoEFFNMethod(QuantizeMethodBase):
             )
             layer.insert_param_to_cell("w2_weight_bias", w2_weight_bias)
             set_weight_attrs(w2_weight_bias, extra_weight_attrs)
-        
+
         self.group_matmul_op = GroupedMatmulV4()
-    
+
     def _group_matmul(self, hidden_states, weight, group_list):
         return self.group_matmul_op(
             [hidden_states],
@@ -172,7 +168,7 @@ class UnquantizedFusedMoEFFNMethod(QuantizeMethodBase):
             group_type=0,
             group_list_type=1,
         )[0]
-    
+
     def _gate_activation(self, gate, activation):
         if activation == "silu":
             return mint.nn.functional.silu(gate)
@@ -199,4 +195,3 @@ class UnquantizedFusedMoEFFNMethod(QuantizeMethodBase):
         )
         expert_output = mint.nan_to_num(expert_output, 0, 0, 0)
         return expert_output
-

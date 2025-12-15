@@ -34,8 +34,9 @@ from sgl_mindspore.layers import (
     VocabParallelEmbedding,
     YaRNScalingRotaryEmbedding,
 )
+from sgl_mindspore.layers.quantization.base_config import get_ms_quant_config
 from sgl_mindspore.models.mindspore_model_base import MindSporeModelBase
-from sgl_mindspore.utils import _get_tp_group_name, tensor_torch2ms
+from sgl_mindspore.utils import _get_tp_group_name, add_prefix, tensor_torch2ms
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +44,9 @@ Qwen3Config = None
 
 
 class Qwen3MoeMLP(nn.Cell):
-    def __init__(self, config) -> None:
+    def __init__(
+        self, config, quant_config: Optional[QuantizationConfig] = None, prefix=""
+    ) -> None:
         super().__init__(config)
 
         self.hidden_size = config.hidden_size
@@ -56,12 +59,16 @@ class Qwen3MoeMLP(nn.Cell):
             param_dtype=self.param_dtype,
             bias=False,
             output_sizes=[self.intermediate_size] * 2,
+            quant_config=quant_config,
+            prefix=add_prefix("gate_up_proj", prefix),
         )
         self.down_proj = RowParallelLinear(
             input_size=config.intermediate_size,
             output_size=config.hidden_size,
             param_dtype=config.param_dtype,
             bias=False,
+            quant_config=quant_config,
+            prefix=add_prefix("down_proj", prefix),
         )
         self.act_fn = SwiGLU()
 
@@ -73,7 +80,9 @@ class Qwen3MoeMLP(nn.Cell):
 
 
 class Qwen3MoeSparseMoeBlock(nn.Cell):
-    def __init__(self, config) -> None:
+    def __init__(
+        self, config, quant_config: Optional[QuantizationConfig] = None, prefix=""
+    ) -> None:
         super().__init__()
 
         self.ep_size = 1
@@ -98,6 +107,8 @@ class Qwen3MoeSparseMoeBlock(nn.Cell):
             ep_size=self.ep_size,
             dp_size=self.dp_size,
             optim_tp_ep_gating_perf=True,
+            quant_config=quant_config,
+            prefix=add_prefix("experts", prefix),
         )
 
         self.gate = MoeReplicatedLinear(
@@ -108,6 +119,8 @@ class Qwen3MoeSparseMoeBlock(nn.Cell):
             optim_tp_ep_gating_perf=self.experts.optim_tp_ep_gating_perf,
             expert_start_index=self.experts.expert_start_index,
             expert_end_index=self.experts.expert_end_index,
+            quant_config=quant_config,
+            prefix=add_prefix("gate", prefix),
         )
 
     def construct(self, hidden_states: Tensor) -> Tensor:
@@ -128,7 +141,9 @@ class Qwen3MoeSparseMoeBlock(nn.Cell):
 
 
 class Qwen3MoeAttention(nn.Cell):
-    def __init__(self, config) -> None:
+    def __init__(
+        self, config, quant_config: Optional[QuantizationConfig] = None, prefix=""
+    ) -> None:
         super().__init__()
 
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -167,6 +182,8 @@ class Qwen3MoeAttention(nn.Cell):
             total_num_kv_heads=self.num_kv_heads,
             bias=config.attention_bias,
             param_dtype=self.param_dtype,
+            quant_config=quant_config,
+            prefix=add_prefix("qkv_proj", prefix),
         )
         self.q_norm = RMSNorm(
             norm_dim=config.head_dim,
@@ -183,6 +200,8 @@ class Qwen3MoeAttention(nn.Cell):
             output_size=self.hidden_size,
             param_dtype=self.param_dtype,
             bias=config.attention_bias,
+            quant_config=quant_config,
+            prefix=add_prefix("o_proj", prefix),
         )
         self.rotary_emb = None
         if self.rope_type == "yarn":
@@ -276,21 +295,39 @@ class Qwen3MoeAttention(nn.Cell):
 
 
 class Qwen3MoeDecoderLayer(nn.Cell):
-    def __init__(self, config, layer_idx: int) -> None:
+    def __init__(
+        self,
+        config,
+        layer_idx: int,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix="",
+    ) -> None:
         super().__init__()
 
         self.hidden_size = config.hidden_size
 
-        self.self_attn = Qwen3MoeAttention(config=config)
+        self.self_attn = Qwen3MoeAttention(
+            config=config,
+            quant_config=quant_config,
+            prefix=add_prefix("self_attn", prefix),
+        )
         mlp_only_layers = (
             [] if not hasattr(config, "mlp_only_layers") else config.mlp_only_layers
         )
         if (layer_idx not in mlp_only_layers) and (
             config.num_experts > 0 and (layer_idx + 1) % config.decoder_sparse_step == 0
         ):
-            self.mlp = Qwen3MoeSparseMoeBlock(config=config)
+            self.mlp = Qwen3MoeSparseMoeBlock(
+                config=config,
+                quant_config=quant_config,
+                prefix=add_prefix("mlp", prefix),
+            )
         else:
-            self.mlp = Qwen3MoeMLP(config=config)
+            self.mlp = Qwen3MoeMLP(
+                config=config,
+                quant_config=quant_config,
+                prefix=add_prefix("mlp", prefix),
+            )
         self.input_layernorm = RMSNorm(
             norm_dim=config.hidden_size,
             eps=config.rms_norm_eps,
@@ -346,7 +383,9 @@ class Qwen3MoeModel(nn.Cell):
     qwen3 moe model
     """
 
-    def __init__(self, config):
+    def __init__(
+        self, config, quant_config: Optional[QuantizationConfig] = None, prefix=""
+    ):
         super().__init__()
         self.config = config
 
@@ -355,12 +394,21 @@ class Qwen3MoeModel(nn.Cell):
         self.num_hidden_layers = config.num_hidden_layers
         self.param_dtype = config.param_dtype
 
-        self.embed_tokens = VocabParallelEmbedding(config=config)
+        self.embed_tokens = VocabParallelEmbedding(
+            config=config,
+            quant_config=quant_config,
+            prefix=add_prefix("embed_tokens", prefix),
+        )
 
         self.layers = nn.CellList()
 
         for i in range(self.num_hidden_layers):
-            layer = Qwen3MoeDecoderLayer(config=config, layer_idx=i)
+            layer = Qwen3MoeDecoderLayer(
+                config=config,
+                layer_idx=i,
+                quant_config=quant_config,
+                prefix=add_prefix(f"layers.{i}", prefix),
+            )
             self.layers.append(layer)
 
         self.norm = RMSNorm(
@@ -438,13 +486,18 @@ class Qwen3MoeForCausalLM(MindSporeModelBase):
 
         self.config = config
         setattr(self.config, "param_dtype", dtype.bfloat16)
-        self.model = Qwen3MoeModel(self.config)
+        quant_config = get_ms_quant_config(quant_config)
+        self.model = Qwen3MoeModel(
+            self.config, quant_config=quant_config, prefix=add_prefix("model", prefix)
+        )
 
         self.lm_head = ColParallelLinear(
             input_size=self.config.hidden_size,
             output_size=self.config.vocab_size,
             param_dtype=self.config.param_dtype,
+            quant_config=quant_config,
             bias=False,
+            prefix=add_prefix("lm_head", prefix),
         )
         self.all_gather = GatherLastDim()
 
