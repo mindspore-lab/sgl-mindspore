@@ -10,9 +10,7 @@ import torch
 from mindspore import Parameter, Tensor, dtype, jit, mint, mutable, nn, ops
 from mindspore.ops.function.array_func import split_ext
 from sglang.srt.distributed import get_tensor_model_parallel_world_size
-from sglang.srt.distributed.utils import divide
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
-from sglang.srt.model_loader.weight_utils import default_weight_loader
 
 from sgl_mindspore.layers import (
     BaseRotaryEmbedding,
@@ -33,38 +31,24 @@ from sgl_mindspore.models.mindspore_model_base import MindSporeModelBase
 from sgl_mindspore.utils import _get_tp_group_name, set_weight_attrs, tensor_torch2ms
 
 
-def transpose_rope_weight(weight, start_dim):
-    w1 = weight[..., -start_dim::2, :]
-    w2 = weight[..., -start_dim + 1 :: 2, :]
-    weight[..., -start_dim:, :] = torch.cat((w1, w2), dim=-2)
-    return weight
+DEEPSEEK_PACKED_MODULES_MAPPING = {
+    "model": {
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+        "kv_b_proj_v": ["kv_b_proj"],
+        "kv_b_proj_k": ["kv_b_proj"],
+        "fused_qkv_a_proj": ["q_a_proj"],
+    }
+}
 
 
-def reorder_qkv_rope_proj_weight(weight_loader):
-    @wraps(weight_loader)
-    def wrapper(*args, **kwargs):
-        param = args[-2]
-        loaded_weight = args[1][:]
-        reorder_params = getattr(param, "reorder_params", {})
-        if not reorder_params:
-            raise ValueError(
-                f"reorder_params of param [{param.name}] should not be empty."
-            )
-        qk_rope_head_dim = reorder_params["qk_rope_head_dim"]
-        if "kv_head_dim" in reorder_params:
-            kv_head_dim = reorder_params["kv_head_dim"]
-            loaded_weight = loaded_weight.reshape(kv_head_dim, -1)
-        else:
-            num_heads = reorder_params["num_heads"]
-            q_head_dim = reorder_params["q_head_dim"]
-            loaded_weight = loaded_weight.reshape(num_heads, q_head_dim, -1)
-
-        loaded_weight = transpose_rope_weight(loaded_weight, qk_rope_head_dim)
-        if "num_heads" in reorder_params:
-            loaded_weight = loaded_weight.reshape(num_heads * q_head_dim, -1)
-        weight_loader(param, loaded_weight, **kwargs)
-
-    return wrapper
+def transpose_rope_weight(weight, start_offset, head_dim, head_nums):
+    ori_shape = weight.shape
+    weight = weight.reshape(head_nums, head_dim, -1)
+    w1 = weight[..., -start_offset::2, :]
+    w2 = weight[..., -start_offset + 1 :: 2, :]
+    weight[..., -start_offset:, :] = torch.cat((w1, w2), dim=-2)
+    return weight.reshape(ori_shape)
 
 
 class DeepseekV3MLP(nn.Cell):
@@ -272,13 +256,14 @@ class DeepseekV3AttentionMLA(nn.Cell):
             mla_v_dim=self.kv_lora_rank,
         )
 
-        self.q_a_proj = MoeReplicatedLinear(
+        self.fused_qkv_a_proj = MoeReplicatedLinear(
             input_size=self.hidden_size,
-            output_size=self.q_lora_rank,
+            output_size=self.q_lora_rank + self.kv_head_dim,
             bias=False,
             param_dtype=config.param_dtype,
             quant_config=quant_config,
-            prefix=f"{prefix}.q_a_proj",
+            prefix=f"{prefix}.fused_qkv_a_proj",
+            beta=(quant_config is not None),
         )
 
         self.q_a_layernorm = RMSNorm(
@@ -296,39 +281,7 @@ class DeepseekV3AttentionMLA(nn.Cell):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.q_b_proj",
-        )
-        set_weight_attrs(
-            self.q_b_proj.weight,
-            {
-                "reorder_params": {
-                    "qk_rope_head_dim": self.qk_rope_head_dim,
-                    "num_heads": self.total_num_heads,
-                    "q_head_dim": self.q_head_dim,
-                },
-                "weight_load": reorder_qkv_rope_proj_weight(self.q_b_proj.weight_load),
-            },
-        )
-
-        # transpose weight avoiding transposition operation
-        self.kv_a_proj_with_mqa = MoeReplicatedLinear(
-            input_size=self.hidden_size,
-            output_size=self.kv_head_dim,
-            param_dtype=config.param_dtype,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.kv_a_proj_with_mqa",
-        )
-        set_weight_attrs(
-            self.kv_a_proj_with_mqa.weight,
-            {
-                "reorder_params": {
-                    "qk_rope_head_dim": self.qk_rope_head_dim,
-                    "kv_head_dim": self.kv_head_dim,
-                },
-                "weight_load": reorder_qkv_rope_proj_weight(
-                    self.kv_a_proj_with_mqa.weight_load
-                ),
-            },
+            beta=(quant_config is not None),
         )
 
         self.kv_a_layernorm = RMSNorm(
@@ -381,17 +334,15 @@ class DeepseekV3AttentionMLA(nn.Cell):
         batch_valid_length: Tensor,
         is_prefill: bool,
     ):
-        # calculate q
-        q = self.q_a_proj(hidden_states)
-        norm_q = self.q_a_layernorm(q)
+        # qkv lora
+        qkv_lora = self.fused_qkv_a_proj(hidden_states)
+        q_c, latent_kv, k_pe = split_ext(
+            qkv_lora, [self.q_lora_rank, self.kv_lora_rank, self.qk_rope_head_dim],
+            dim=-1,
+        )
+        norm_q = self.q_a_layernorm(q_c)
         q = self.q_b_proj(norm_q)
         q = q.view((-1, self.local_num_heads, self.q_head_dim))
-
-        # calculate k(v)
-        latent_kv_all = self.kv_a_proj_with_mqa(hidden_states)
-        latent_kv, k_pe = split_ext(
-            latent_kv_all, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
-        )
         i_kv = self.kv_a_layernorm(latent_kv)
 
         # q， k rope
@@ -669,7 +620,9 @@ class DeepseekV3ForCausalLM(MindSporeModelBase):
         super().__init__()
         self.config = config
         quant_config = get_ms_quant_config(quant_config)
-        quant_config.packed_modules_mapping = packed_modules_mapping
+        self.quant_config = quant_config
+        if quant_config is not None:
+            quant_config.packed_modules_mapping = DEEPSEEK_PACKED_MODULES_MAPPING
         setattr(self.config, "param_dtype", dtype.bfloat16)
         self.prev_prefill = False
         self.key_cache = []
@@ -755,14 +708,31 @@ class DeepseekV3ForCausalLM(MindSporeModelBase):
             num_experts=self.config.n_routed_experts,
         )
 
+        cached_a_proj = {}
         loaded_params: set[str] = set()
-
-        for k in params_dict.keys():
-            print(f"params_dict:{k}")
 
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
+
+            if "q_b_proj" in name and loaded_weight.numel() > 1:
+                head_nums = self.config.num_attention_heads
+                q_head_dim = self.config.qk_nope_head_dim + self.config.qk_rope_head_dim
+                loaded_weight = transpose_rope_weight(
+                    loaded_weight,
+                    start_offset=self.config.qk_rope_head_dim,
+                    head_dim=q_head_dim,
+                    head_nums=head_nums,
+                )
+            
+            if "kv_a_proj_with_mqa" in name and loaded_weight.numel() > 1:
+                kv_head_dim = self.config.kv_lora_rank + self.config.qk_rope_head_dim
+                loaded_weight = transpose_rope_weight(
+                    loaded_weight,
+                    start_offset=self.config.qk_rope_head_dim,
+                    head_dim=kv_head_dim,
+                    head_nums=1,
+                )
 
             if "kv_b_proj" in name and name not in params_dict:
                 k_name = name.replace("kv_b_proj", "kv_b_proj_k")
@@ -835,6 +805,40 @@ class DeepseekV3ForCausalLM(MindSporeModelBase):
                 else:
                     if is_expert_weight:
                         continue
+                    
+                    if self.quant_config is not None:
+                        if "input_layernorm.bias" in name:
+                            name = name.replace("input_layernorm.bias", "self_attn.fused_qkv_a_proj.beta")
+                        if "q_a_layernorm.bias" in name:
+                            name = name.replace("q_a_layernorm.bias", "q_b_proj.beta")
+                    
+                    if "q_a_proj" in name or "kv_a_proj_with_mqa" in name:
+                        cached_a_proj[name] = loaded_weight
+                        q_a_proj_name = (
+                            name
+                            if "q_a_proj" in name
+                            else name.replace("kv_a_proj_with_mqa", "q_a_proj")
+                        )
+                        kv_a_proj_name = (
+                            name
+                            if "kv_a_proj_with_mqa" in name
+                            else name.replace("q_a_proj", "kv_a_proj_with_mqa")
+                        )
+
+                        if (
+                            q_a_proj_name in cached_a_proj
+                            and kv_a_proj_name in cached_a_proj
+                        ):
+                            q_a_proj_weight = cached_a_proj.pop(q_a_proj_name)
+                            kv_a_proj_weight = cached_a_proj.pop(kv_a_proj_name)
+                            loaded_weight = torch.cat([q_a_proj_weight, kv_a_proj_weight], dim=0)
+                            name = (
+                                name.replace("q_a_proj", "fused_qkv_a_proj")
+                                if "q_a_proj" in name
+                                else name.replace("kv_a_proj_with_mqa", "fused_qkv_a_proj")
+                            )
+                        else:
+                            continue
 
                     if name.endswith(".bias") and name not in params_dict:
                         continue
@@ -906,14 +910,5 @@ class DeepseekV3ForCausalLM(MindSporeModelBase):
         model_inputs["key_cache"] = key_cache
         return model_inputs
 
-
-packed_modules_mapping = {
-    "model": {
-        "gate_up_proj": ["gate_proj", "up_proj"],
-        "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
-        "kv_b_proj_v": ["kv_b_proj"],
-        "kv_b_proj_k": ["kv_b_proj"],
-    }
-}
 
 EntryClass = DeepseekV3ForCausalLM

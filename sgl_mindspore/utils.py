@@ -30,7 +30,7 @@ def tensor_ms2torch(x: ms.Tensor):
 
 
 def split_loaded_weight(loaded_weight, shard_dim, start_idx, shard_size):
-    if shard_dim is None:
+    if shard_dim is None or loaded_weight.shape[shard_dim] == 1:
         loaded_weight = loaded_weight[:]
         return loaded_weight
 

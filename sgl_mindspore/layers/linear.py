@@ -31,11 +31,14 @@ class LinearBase(nn.Cell):
         param_dtype: Optional[ms.dtype] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        beta: bool = False,
     ) -> None:
         super().__init__()
         self.input_size = input_size
         self.output_size = output_size
         self.quant_config = quant_config
+        self.enable_bias = bias
+        self.enable_beta = beta
         if param_dtype is None:
             param_dtype = ms.float32
         if quant_config is None:
@@ -56,6 +59,7 @@ class ColParallelLinear(LinearBase):
         param_dtype: Optional[ms.dtype] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        beta: bool = False,
     ) -> None:
         super().__init__(
             input_size=input_size,
@@ -64,13 +68,13 @@ class ColParallelLinear(LinearBase):
             param_dtype=param_dtype,
             quant_config=quant_config,
             prefix=prefix,
+            beta=beta,
         )
 
         self.tp_size = get_tensor_model_parallel_world_size()
         self.param_dtype = param_dtype
         self.input_size = input_size
         self.output_size = output_size // self.tp_size
-        self.enable_bias = bias
 
         self.matmul = ops.MatMul(transpose_b=True)
         assert self.quant_method is not None
@@ -94,7 +98,7 @@ class ColParallelLinear(LinearBase):
         return x
 
     def weight_load(self, param: Tensor, weight: torch.Tensor) -> None:
-        if weight.numel() > 1:
+        if weight.numel() > 1 and hasattr(param, "output_dim"):
             tp_rank = get_tensor_model_parallel_rank()
             output_dim = getattr(param, "output_dim", 0)
             shard_size = param.shape[output_dim]
@@ -249,6 +253,7 @@ class RowParallelLinear(LinearBase):
         quant_config: Optional[QuantizationConfig] = None,
         reduce_results: bool = True,
         prefix: str = "",
+        beta: bool = False,
     ) -> None:
         super().__init__(
             input_size=input_size,
@@ -257,13 +262,13 @@ class RowParallelLinear(LinearBase):
             param_dtype=param_dtype,
             quant_config=quant_config,
             prefix=prefix,
+            beta=beta,
         )
 
         self.tp_size = get_tensor_model_parallel_world_size()
         self.param_dtype = param_dtype
         self.input_size = input_size // self.tp_size
         self.output_size = output_size
-        self.enable_bias = bias
         self.reduce_results = reduce_results
 
         self.matmul = ops.MatMul(transpose_b=True)
@@ -316,6 +321,7 @@ class MoeReplicatedLinear(LinearBase):
         expert_end_index: Optional[Type] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        beta: bool = False,
     ) -> None:
         super().__init__(
             input_size=input_size,
@@ -324,9 +330,9 @@ class MoeReplicatedLinear(LinearBase):
             param_dtype=param_dtype,
             quant_config=quant_config,
             prefix=prefix,
+            beta=beta,
         )
 
-        self.enable_bias = bias
         self.param_dtype = param_dtype
         self.optim_tp_ep_gating_perf = optim_tp_ep_gating_perf
         self.expert_start_index = expert_start_index
@@ -354,14 +360,18 @@ class MoeReplicatedLinear(LinearBase):
         return output
 
     def weight_load(self, param: Parameter, weight: torch.Tensor):
-        weight = weight.contiguous().to(torch.float32).numpy()
-        weight = weight[:]
         if len(weight) == 0:
             weight = weight.reshape(1)
+        
+        if param.size == 1:
+            if torch.allclose(weight, weight[0]):
+                weight = weight[:1]
+            else:
+                raise ValueError(f"param[{param.name}] loaded_weight are not equal.")
 
         assert param.shape == weight.shape, (
             f"Tried to load weights of size {weight.size()}"
-            f"to a parameter of size {param.size()}"
+            f"to a parameter of size {param.size}"
         )
 
         if self.optim_tp_ep_gating_perf:
@@ -377,4 +387,4 @@ class MoeReplicatedLinear(LinearBase):
                 ]
                 weight = np.concatenate(rearange_weight, axis=0)
 
-        param.set_data(from_numpy(weight).to(self.param_dtype))
+        param.set_data(tensor_torch2ms(weight).to(self.param_dtype))
