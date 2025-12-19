@@ -108,6 +108,12 @@ class MSW8A8LinearMethod(LinearMethodBase):
                 [output_size_per_partition, 1], dtype=params_dtype
             ),
         }
+        
+        if layer.enable_beta:
+            beta = ms.Parameter(ms.mint.zeros((input_size_per_partition, ), dtype=params_dtype), requires_grad=False)
+            set_weight_attrs(beta, {"input_dim": 0})
+            set_weight_attrs(beta, extra_weight_attrs)
+            layer.insert_param_to_cell("beta", beta)
 
         for name, data in q_weight_dict.items():
             param = ms.Parameter(data, requires_grad=False)
@@ -144,6 +150,8 @@ class MSW8A8LinearMethod(LinearMethodBase):
         bias: Optional[ms.Tensor] = None,
     ) -> ms.Tensor:
         original_dtype = x.dtype
+        if layer.enable_beta:
+            x = ms.ops.add(x, layer.beta)
         if original_dtype != ms.int8:
             x = x.to(layer.input_scale.dtype)
             qx = self.quant(
