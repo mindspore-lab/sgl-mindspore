@@ -2,7 +2,7 @@
 
 # SGL-MindSpore
 
-This is the MindSpore model repository for [SGLang](https://github.com/sgl-project/sglang). To use MindSpore models, you need to install SGLang and this repository.
+This is the MindSpore model repository for [SGLang](https://github.com/sgl-project/sglang). Please prepare a Python 3.11 environment, then install SGLang and this repository.
 
 ## Support Matrix
 
@@ -18,9 +18,7 @@ This is a step-by-step guide helping you to run MindSpore models in SGLang.
 
 ### 1. Install CANN
 
-Please install the 8.3.RC1 (or higher) community edition: [https://www.hiascend.com/developer/download/community/result?module=cann&cann=8.3.RC1]
-
-The packages you need to install include toolkit, kernels and nnal. Please choose the appropriate packages according to your NPU type.
+Please install the [CANN 8.3.RC1 community edition](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/83RC1/softwareinst/instg/instg_0000.html). This version is compatible with the MindSpore 2.7.1 nightly build. If you need to use a released version of MindSpore, then you **must install CANN 8.5 and update the NPU driver version to 25.5**. The packages you need to install include **toolkit, kernels and nnal**. Please choose the appropriate packages according to your NPU type.
 
 ### 2. Install SGLang for the Ascend platform
 
@@ -48,12 +46,13 @@ git clone https://github.com/mindspore-lab/sgl-mindspore.git
 cd sgl-mindspore
 pip install -e .
 ```
+It will automatically install MindSpore 2.7.2. If you have CANN 8.3.RC1 installed and want to save the hassle upgrading CANN and NPU driver, we recommend downloading the [MindSpore 2.7.1 nightly build](https://repo.mindspore.cn/mindspore/mindspore/version/202512/20251201/master_20251201010020_04c28173998bb79675ec5ac67105eaaeb819663c_newest/unified/aarch64/mindspore-2.7.1-cp311-cp311-linux_aarch64.whl) and pip install it. Note that MindSpore 2.7.1 or earlier released versions are not supported by SGLang-MindSpore.
 
 ## Usage
 
 Please set the following environment variables before you run:
 ```
-export ASCEND_RT_VISIBLE_DEVICES=0  # NPU device id
+export ASCEND_RT_VISIBLE_DEVICES=0  # specify the NPU device id
 export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python  # avoid protobuf version mismatch
 ```
 
@@ -85,10 +84,11 @@ To benchmark a single batch：
 bash examples/bench_one_batch.sh
 ```
 
-To start a server and benchmark：
+To benchmark in server mode, first start a server, then run：
 ```
 bash examples/bench_serving.sh
 ```
+The `host` and `port` arguments must match the server's setting.
 
 You can modify the test arguments inside the scripts.
 

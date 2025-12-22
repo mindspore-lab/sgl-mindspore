@@ -2,7 +2,7 @@
 
 # SGL-MindSpore
 
-本仓库为[SGLang](https://github.com/sgl-project/sglang)提供MindSpore模型支持。要使用MindSpore模型，您需要安装SGLang和本仓库。
+本仓库为[SGLang](https://github.com/sgl-project/sglang)提供MindSpore模型支持。您需要准备Python 3.11环境，并安装SGLang和本仓库。
 
 ## 支持矩阵
 
@@ -18,8 +18,9 @@
 
 ### 1. 安装CANN
 
-请安装社区版8.3.RC1或更高版本：[https://www.hiascend.com/developer/download/community/result?module=cann&cann=8.3.RC1]
-需要安装的软件包包括toolkit, kernels和nnal。请根据您的NPU型号选择合适的软件包。
+请安装[社区版8.3.RC1](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/83RC1/softwareinst/instg/instg_0000.html)。
+该版本适合MindSpore 2.7.1每日构建版。如果您需要使用MindSpore发行版，**必须安装CANN 8.5并更新NPU驱动至25.5**。
+需要安装的软件包包括**toolkit, kernels和nnal**。请根据您的NPU型号选择合适的软件包。
 
 ### 2. 基于昇腾平台，安装SGLang
 
@@ -47,12 +48,13 @@ git clone https://github.com/mindspore-lab/sgl-mindspore.git
 cd sgl-mindspore
 pip install -e .
 ```
+该命令会自动安装MindSpore 2.7.2发行版。如果你安装了CANN 8.3.RC1，我们建议下载[MindSpore 2.7.1每日构建包](https://repo.mindspore.cn/mindspore/mindspore/version/202512/20251201/master_20251201010020_04c28173998bb79675ec5ac67105eaaeb819663c_newest/unified/aarch64/mindspore-2.7.1-cp311-cp311-linux_aarch64.whl) 并使用pip install安装，以免于升级CANN和NPU驱动。注意：SGLang-MindSpore不支持MindSpore 2.7.1发行版或更早版本。
 
 ## 使用示范
 
 运行前请设置以下环境变量：
 ```
-export ASCEND_RT_VISIBLE_DEVICES=0  # NPU设备ID
+export ASCEND_RT_VISIBLE_DEVICES=0  # 指定你想使用的NPU设备ID
 export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python  # 避免protobuf版本不匹配
 ```
 
@@ -84,10 +86,11 @@ bash examples/start_server.sh
 bash examples/bench_one_batch.sh
 ```
 
-测试服务化推理性能：
+测试服务化推理性能，请先启动服务，然后运行
 ```
 bash examples/bench_serving.sh
 ```
+`host`和`port`参数必须和启动服务时的参数匹配。
 
 可以在脚本内修改测试参数。
 
