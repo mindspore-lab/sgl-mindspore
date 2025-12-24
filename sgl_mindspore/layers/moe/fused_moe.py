@@ -4,7 +4,11 @@ from typing import Callable, List, Optional, Tuple, Type
 
 import numpy as np
 import torch
-import ms_custom_ops
+
+try:
+    import ms_custom_ops
+except ImportError:
+    print("ms_custom_ops not installed, only supports dense models.")
 from mindspore import Parameter, Tensor, dtype, mint, nn, ops
 from mindspore.ops.auto_generate import (
     FusedAddTopKDiv,
@@ -12,13 +16,20 @@ from mindspore.ops.auto_generate import (
     MoeInitRoutingV2,
     MoeTokenUnpermute,
 )
-from sglang.srt.distributed import get_tensor_model_parallel_rank, get_moe_expert_parallel_rank
+from sglang.srt.distributed import (
+    get_moe_expert_parallel_rank,
+    get_tensor_model_parallel_rank,
+)
 
-from sgl_mindspore.utils import _get_tp_group_name, split_loaded_weight, tensor_torch2ms, is_910b
+from sgl_mindspore.utils import (
+    _get_tp_group_name,
+    is_910b,
+    split_loaded_weight,
+    tensor_torch2ms,
+)
 
-def determine_expert_map(
-        ep_size: int, ep_rank: int,
-        global_num_experts: int):
+
+def determine_expert_map(ep_size: int, ep_rank: int, global_num_experts: int):
     assert ep_size > 0
     if ep_size == 1:
         return (global_num_experts, None)
@@ -30,13 +41,15 @@ def determine_expert_map(
     # Create an expert map for the local experts
     if ep_rank < (ep_size - 1):
         # Each non-last rank gets local_num_experts experts.
-        expert_map[ep_rank * local_num_experts:
-                   (ep_rank + 1) * local_num_experts] = \
+        expert_map[ep_rank * local_num_experts : (ep_rank + 1) * local_num_experts] = (
             np.arange(0, local_num_experts, dtype=np.int32)
+        )
     else:
         # All remaining experts are assigned to the last rank.
-        local_num_experts = (global_num_experts - ep_rank * local_num_experts)
-        expert_map[-local_num_experts:] = np.arange(0, local_num_experts, dtype=np.int32)
+        local_num_experts = global_num_experts - ep_rank * local_num_experts
+        expert_map[-local_num_experts:] = np.arange(
+            0, local_num_experts, dtype=np.int32
+        )
     return (local_num_experts, expert_map)
 
 
@@ -137,9 +150,9 @@ class FusedExperts(nn.Cell):
 
             self.dispatch = ms_custom_ops.moe_distribute_dispatch_v3
             self.combine = ms_custom_ops.moe_distribute_combine_v3
-            self.dispatch_tp_world_size = 0 if is_910b() else 1     # 910b:0, 910_A3:1
-            self.dispatch_shared_expert_num = 0 if is_910b() else 1 # 910b:0, 910_A3:1
-            self.max_bs = 256 if is_910b() else 512 # max b*s in single npu
+            self.dispatch_tp_world_size = 0 if is_910b() else 1  # 910b:0, 910_A3:1
+            self.dispatch_shared_expert_num = 0 if is_910b() else 1  # 910b:0, 910_A3:1
+            self.max_bs = 256 if is_910b() else 512  # max b*s in single npu
             self.max_bs *= self.ep_size
         elif self.ep_size == 1 and self.tp_size >= 1:
             self.pure_tp = True
@@ -375,7 +388,15 @@ class FusedExperts(nn.Cell):
     ):
         """fused ops, moe feed forward with dispatch and combine."""
         # Dispatch
-        expand_x, _, assist_info_for_combine, expert_token_nums, ep_recv_counts, tp_recv_counts, _ = self.dispatch(
+        (
+            expand_x,
+            _,
+            assist_info_for_combine,
+            expert_token_nums,
+            ep_recv_counts,
+            tp_recv_counts,
+            _,
+        ) = self.dispatch(
             x=hidden_states,
             expert_ids=topk_ids,
             ep_world_size=self.ep_size,
@@ -385,7 +406,8 @@ class FusedExperts(nn.Cell):
             tp_world_size=self.dispatch_tp_world_size,
             shared_expert_num=self.dispatch_shared_expert_num,
             global_bs=self.max_bs,
-            expert_token_nums_type=1)
+            expert_token_nums_type=1,
+        )
 
         # GroupMamtul
         ffn_res = self._ffn(expand_x, w1, w2, expert_token_nums, activation)
@@ -404,7 +426,8 @@ class FusedExperts(nn.Cell):
             group_ep=self.ep_group,
             tp_world_size=self.dispatch_tp_world_size,
             shared_expert_num=self.dispatch_shared_expert_num,
-            global_bs=self.max_bs)
+            global_bs=self.max_bs,
+        )
 
         return moe_output
 
@@ -444,7 +467,7 @@ class FusedMoe(nn.Cell):
         self.ep_rank = get_moe_expert_parallel_rank() if ep_size > 1 else 0
         if self.ep_size > 1:
             self.tp_size = 1
-            self.tp_rank = 0 
+            self.tp_rank = 0
         else:
             self.tp_size = tp_size if tp_size is not None else 1
             self.tp_rank = get_tensor_model_parallel_rank() if tp_size > 1 else 0
@@ -462,10 +485,10 @@ class FusedMoe(nn.Cell):
             self.local_num_experts, self.expert_map = determine_expert_map(
                 ep_size=self.ep_size,
                 ep_rank=self.ep_rank,
-                global_num_experts=self.global_num_experts)
+                global_num_experts=self.global_num_experts,
+            )
         else:
-            self.local_num_experts, self.expert_map = (self.global_num_experts,
-                                                       None)
+            self.local_num_experts, self.expert_map = (self.global_num_experts, None)
         if self.ep_rank < (self.ep_size - 1):
             self.expert_start_index = self.ep_rank * self.local_num_experts
             self.expert_end_index = (self.ep_rank + 1) * self.local_num_experts
