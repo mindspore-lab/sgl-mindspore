@@ -4,6 +4,7 @@ from typing import Callable, List, Optional, Tuple, Type
 
 import numpy as np
 import torch
+import ms_custom_ops
 from mindspore import Parameter, Tensor, dtype, mint, nn, ops
 from mindspore.ops.auto_generate import (
     FusedAddTopKDiv,
@@ -11,9 +12,32 @@ from mindspore.ops.auto_generate import (
     MoeInitRoutingV2,
     MoeTokenUnpermute,
 )
-from sglang.srt.distributed import get_tensor_model_parallel_rank
+from sglang.srt.distributed import get_tensor_model_parallel_rank, get_moe_expert_parallel_rank
 
-from sgl_mindspore.utils import _get_tp_group_name, split_loaded_weight, tensor_torch2ms
+from sgl_mindspore.utils import _get_tp_group_name, split_loaded_weight, tensor_torch2ms, is_910b
+
+def determine_expert_map(
+        ep_size: int, ep_rank: int,
+        global_num_experts: int):
+    assert ep_size > 0
+    if ep_size == 1:
+        return (global_num_experts, None)
+
+    local_num_experts = global_num_experts // ep_size
+
+    # Create a numpy array of size global_num_experts filled with -1
+    expert_map = np.full((global_num_experts,), -1, dtype=np.int32)
+    # Create an expert map for the local experts
+    if ep_rank < (ep_size - 1):
+        # Each non-last rank gets local_num_experts experts.
+        expert_map[ep_rank * local_num_experts:
+                   (ep_rank + 1) * local_num_experts] = \
+            np.arange(0, local_num_experts, dtype=np.int32)
+    else:
+        # All remaining experts are assigned to the last rank.
+        local_num_experts = (global_num_experts - ep_rank * local_num_experts)
+        expert_map[-local_num_experts:] = np.arange(0, local_num_experts, dtype=np.int32)
+    return (local_num_experts, expert_map)
 
 
 def fused_topk(
@@ -84,7 +108,7 @@ class FusedExperts(nn.Cell):
         self.moe_init_routing_op = MoeInitRoutingV2()
         self.moe_token_unpermute = MoeTokenUnpermute()
 
-        self.pure_tp = True
+        self.pure_tp = False
         self.pure_ep = False
         self.tp_ep = False
 
@@ -106,12 +130,17 @@ class FusedExperts(nn.Cell):
                 self.experts_num
                 - ((self.experts_num // self.ep_size) * (self.ep_size - 1))
             )
-            self.ep_group = "ep_group"
+            self.ep_group = _get_tp_group_name()
 
         if self.ep_size > 1 and self.tp_size == 1:
             self.pure_ep = True
 
-            self.use_all2all_kernels = use_all2all_kernels
+            self.dispatch = ms_custom_ops.moe_distribute_dispatch_v3
+            self.combine = ms_custom_ops.moe_distribute_combine_v3
+            self.dispatch_tp_world_size = 0 if is_910b() else 1     # 910b:0, 910_A3:1
+            self.dispatch_shared_expert_num = 0 if is_910b() else 1 # 910b:0, 910_A3:1
+            self.max_bs = 256 if is_910b() else 512 # max b*s in single npu
+            self.max_bs *= self.ep_size
         elif self.ep_size == 1 and self.tp_size >= 1:
             self.pure_tp = True
         else:
@@ -268,7 +297,7 @@ class FusedExperts(nn.Cell):
         if self.dp_size > 1 or not self.optim_tp_ep_gating_perf:
             topk_mask = topk_ids < self.expert_start_index
             local_topk_ids = topk_ids - self.expert_start_index
-            local_topk_ids = local_topk_ids.astype(dtype.in32)
+            local_topk_ids = local_topk_ids.astype(dtype.int32)
 
             local_topk_ids = ops.masked_fill(
                 local_topk_ids, topk_mask, self.experts_num - 1
@@ -322,7 +351,16 @@ class FusedExperts(nn.Cell):
         topk_weights = topk_weights.astype(hidden_states.dtype)
         topk_ids = topk_ids.astype(dtype=dtype.int32)
 
-        return
+        return self._ep_with_dispatch_combine(
+            hidden_states,
+            w1,
+            w2,
+            topk_ids,
+            topk_weights,
+            activation,
+            global_num_experts,
+            apply_router_weight_on_input,
+        )
 
     def _ep_with_dispatch_combine(
         self,
@@ -335,9 +373,40 @@ class FusedExperts(nn.Cell):
         global_num_experts,
         apply_router_weight_on_input,
     ):
-        raise NotImplementedError(
-            "ep parallel with dispatch and combine is not implemented."
-        )
+        """fused ops, moe feed forward with dispatch and combine."""
+        # Dispatch
+        expand_x, _, assist_info_for_combine, expert_token_nums, ep_recv_counts, tp_recv_counts, _ = self.dispatch(
+            x=hidden_states,
+            expert_ids=topk_ids,
+            ep_world_size=self.ep_size,
+            ep_rank_id=self.ep_rank,
+            moe_expert_num=global_num_experts,
+            group_ep=self.ep_group,
+            tp_world_size=self.dispatch_tp_world_size,
+            shared_expert_num=self.dispatch_shared_expert_num,
+            global_bs=self.max_bs,
+            expert_token_nums_type=1)
+
+        # GroupMamtul
+        ffn_res = self._ffn(expand_x, w1, w2, expert_token_nums, activation)
+
+        # Combine
+        moe_output = self.combine(
+            expand_x=ffn_res,
+            expert_ids=topk_ids,
+            assist_info_for_combine=assist_info_for_combine,
+            ep_send_counts=ep_recv_counts,
+            expert_scales=topk_weights.astype(dtype.float32),
+            ep_world_size=self.ep_size,
+            ep_rank_id=self.ep_rank,
+            moe_expert_num=global_num_experts,
+            tp_send_counts=tp_recv_counts,
+            group_ep=self.ep_group,
+            tp_world_size=self.dispatch_tp_world_size,
+            shared_expert_num=self.dispatch_shared_expert_num,
+            global_bs=self.max_bs)
+
+        return moe_output
 
 
 class FusedMoe(nn.Cell):
@@ -369,23 +438,41 @@ class FusedMoe(nn.Cell):
 
         assert apply_router_weight_on_input == False
         self.param_dtype = param_dtype
-        self.global_num_experts = num_experts + num_redundant_experts
-        self.local_num_experts, self.expert_map = (self.global_num_experts, None)
+        self.global_num_experts = num_experts
 
-        assert ep_size == 1
-        self.ep_size = ep_size
-        self.ep_rank = 0
-        assert dp_size == 1
-        self.dp_size = dp_size
+        self.ep_size = ep_size if ep_size is not None else 1
+        self.ep_rank = get_moe_expert_parallel_rank() if ep_size > 1 else 0
+        if self.ep_size > 1:
+            self.tp_size = 1
+            self.tp_rank = 0 
+        else:
+            self.tp_size = tp_size if tp_size is not None else 1
+            self.tp_rank = get_tensor_model_parallel_rank() if tp_size > 1 else 0
+        self.dp_size = 1
         self.dp_rank = 0
-        self.tp_size = tp_size
-        self.tp_rank = get_tensor_model_parallel_rank()
+
         self.tp_ep = False
-        self.pure_tp = True
-        self.pure_ep = False
+        self.pure_tp = self.tp_size > 1 and self.ep_size == 1
+        self.pure_ep = self.ep_size > 1 and self.tp_size == 1
+
         self.optim_tp_ep_gating_perf = optim_tp_ep_gating_perf and self.tp_ep
-        self.expert_start_index = 0
-        self.expert_end_index = self.global_num_experts
+
+        # Determine expert maps
+        if self.ep_size > 1:
+            self.local_num_experts, self.expert_map = determine_expert_map(
+                ep_size=self.ep_size,
+                ep_rank=self.ep_rank,
+                global_num_experts=self.global_num_experts)
+        else:
+            self.local_num_experts, self.expert_map = (self.global_num_experts,
+                                                       None)
+        if self.ep_rank < (self.ep_size - 1):
+            self.expert_start_index = self.ep_rank * self.local_num_experts
+            self.expert_end_index = (self.ep_rank + 1) * self.local_num_experts
+        else:
+            self.expert_start_index = self.ep_rank * self.local_num_experts
+            self.expert_end_index = self.global_num_experts
+
         self.top_k = top_k
         assert intermediate_size % self.tp_size == 0
         self.hidden_size = hidden_size
@@ -407,7 +494,7 @@ class FusedMoe(nn.Cell):
 
         self.w13_weight = Parameter(
             mint.empty(
-                self.global_num_experts,
+                self.local_num_experts,
                 self.hidden_size,
                 2 * self.intermediate_size_per_partition,
                 dtype=self.param_dtype,
@@ -419,7 +506,7 @@ class FusedMoe(nn.Cell):
 
         self.w2_weight = Parameter(
             mint.empty(
-                self.global_num_experts,
+                self.local_num_experts,
                 self.intermediate_size_per_partition,
                 self.hidden_size,
                 dtype=self.param_dtype,
@@ -734,7 +821,7 @@ class FusedMoe(nn.Cell):
             custom_routing_functions=self.custom_routing_function,
             scoring_func=self.scoring_func,
             e_score_correction_bias=self.e_score_correction_bias,
-            indices_type=None,
+            indices_type=dtype.int32,
         )
 
         final_hidden_states = self.fused_experts(

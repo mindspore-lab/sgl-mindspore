@@ -5,7 +5,12 @@ import torch
 import torch_npu
 from mindspore.utils.dlpack import from_dlpack as ms_from_dlpack
 from mindspore.utils.dlpack import to_dlpack as ms_to_dlpack
+from mindspore._c_expression import MSContext
 from sglang.srt.distributed import get_tp_group, get_world_group
+
+def is_910b():
+    device = MSContext.get_instance().get_ascend_soc_version()
+    return device in ['910b', 'ascend910b']
 
 
 def tensor_torch2ms(x: torch.Tensor):

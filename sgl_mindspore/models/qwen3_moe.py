@@ -13,12 +13,14 @@ import numpy as np
 import torch
 from mindspore import Parameter, Tensor, dtype, jit, mint, mutable, nn, ops
 from sglang.srt.distributed import (
+    get_moe_expert_parallel_world_size,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     get_tp_group,
 )
 from sglang.srt.distributed.utils import divide
 from sglang.srt.layers.dp_attention import get_attention_tp_rank, get_attention_tp_size
+from sglang.srt.eplb.expert_location import ModelConfigForExpertLocation
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 
 from sgl_mindspore.layers import (
@@ -77,7 +79,7 @@ class Qwen3MoeSparseMoeBlock(nn.Cell):
     def __init__(self, config) -> None:
         super().__init__()
 
-        self.ep_size = 1
+        self.ep_size = get_moe_expert_parallel_world_size()
         self.dp_size = 1
         self.tp_size = get_tensor_model_parallel_world_size()
 
@@ -303,9 +305,7 @@ class Qwen3MoeDecoderLayer(nn.Cell):
         mlp_only_layers = (
             [] if not hasattr(config, "mlp_only_layers") else config.mlp_only_layers
         )
-        if (layer_idx not in mlp_only_layers) and (
-            config.num_experts > 0 and (layer_idx + 1) % config.decoder_sparse_step == 0
-        ):
+        if (layer_idx not in mlp_only_layers) and (config.num_experts > 0):
             self.mlp = Qwen3MoeSparseMoeBlock(config=config)
         else:
             self.mlp = Qwen3MoeMLP(config=config)
@@ -572,6 +572,8 @@ class Qwen3MoeForCausalLM(MindSporeModelBase):
                     ) and name not in param_dict:
                         continue
 
+                    if name not in param_dict:
+                        continue
                     param = param_dict[name]
                     weight_load = param.weight_load
                     weight_load(
@@ -617,6 +619,14 @@ class Qwen3MoeForCausalLM(MindSporeModelBase):
         logits = ops.cast(logits, dtype.float32)
         logits = mint.reshape(logits, (-1, logits.shape[-1]))
         return logits
+
+    @classmethod
+    def get_model_config_for_expert_location(cls, config):
+        return ModelConfigForExpertLocation(
+            num_layers=config.num_hidden_layers,
+            num_logical_experts=config.num_experts,
+            num_groups=None,
+        )
 
 
 EntryClass = Qwen3MoeForCausalLM
