@@ -19,7 +19,7 @@ classifiers = [
 requires-python = ">=3.10"
 dependencies = [
     "sglang",
-    "mindspore==2.7.2",
+    "mindspore @ https://repo.mindspore.cn/mindspore/mindspore/version/202512/20251211/master_20251211010018_65a9c09590c14021cbe38cb8720acb5dad022901_newest/unified/aarch64/mindspore-2.7.1-cp311-cp311-linux_aarch64.whl",
     "torch==2.8.0",
     "torch_npu==2.8.0",
     "torchvision",

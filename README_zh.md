@@ -48,7 +48,7 @@ git clone https://github.com/mindspore-lab/sgl-mindspore.git
 cd sgl-mindspore
 pip install -e .
 ```
-该命令会自动安装MindSpore 2.7.2发行版。如果你安装了CANN 8.3.RC1，我们建议下载[MindSpore 2.7.1每日构建包](https://repo.mindspore.cn/mindspore/mindspore/version/202512/20251211/master_20251211010018_65a9c09590c14021cbe38cb8720acb5dad022901_newest/unified/aarch64/mindspore-2.7.1-cp311-cp311-linux_aarch64.whl) 并使用pip install安装，以免于升级CANN和NPU驱动。注意：SGLang-MindSpore不支持MindSpore 2.7.1发行版或更早版本。
+该命令会自动安装MindSpore 2.7.1每日构建包。如果您需要使用发行版，请执行`pip install mindspore==2.7.2`，并升级CANN至8.5。
 
 ## 使用示范
 

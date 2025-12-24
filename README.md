@@ -46,7 +46,7 @@ git clone https://github.com/mindspore-lab/sgl-mindspore.git
 cd sgl-mindspore
 pip install -e .
 ```
-It will automatically install MindSpore 2.7.2. If you have CANN 8.3.RC1 installed and want to save the hassle upgrading CANN and NPU driver, we recommend downloading the [MindSpore 2.7.1 nightly build](https://repo.mindspore.cn/mindspore/mindspore/version/202512/20251211/master_20251211010018_65a9c09590c14021cbe38cb8720acb5dad022901_newest/unified/aarch64/mindspore-2.7.1-cp311-cp311-linux_aarch64.whl) and pip install it. Note that MindSpore 2.7.1 or earlier released versions are not supported by SGLang-MindSpore.
+It will automatically install MindSpore 2.7.1 nightly build. If you need to use a released version, please `pip install mindspore==2.7.2` and upgrade CANN to 8.5.
 
 ## Usage
 
