@@ -40,6 +40,8 @@ from sgl_mindspore.utils import (
     add_prefix,
     get_ms_dtype,
     tensor_torch2ms,
+    format_cast,
+    is_310p
 )
 
 logger = logging.getLogger(__name__)
@@ -84,7 +86,6 @@ class Qwen3MLP(nn.Cell):
         x = self.act_fn(x)
         x = self.down_proj(x)
         return x
-
 
 class Qwen3Attention(nn.Cell):
     def __init__(
@@ -444,6 +445,11 @@ class Qwen3ForCausalLM(MindSporeModelBase):
             param_dtype = get_ms_dtype(self.config.dtype)
         else:
             param_dtype = ms.dtype.bfloat16
+        if param_dtype == ms.bfloat16 and is_310p:
+            param_dtype = ms.float16
+            logger.warning(
+                "Ascend 310P does not support bfloat16, will convert to float16"
+            )
         setattr(self.config, "param_dtype", param_dtype)
         self.model = Qwen3Model(
             self.config, quant_config=quant_config, prefix=add_prefix("model", prefix)
@@ -456,6 +462,7 @@ class Qwen3ForCausalLM(MindSporeModelBase):
             bias=False,
             prefix=add_prefix("lm_head", prefix),
         )
+        self.lm_head.construct = jit(self.lm_head.construct)
         self.tp_size = get_tensor_model_parallel_world_size()
         self.all_gather = GatherLastDim()
 
@@ -464,6 +471,8 @@ class Qwen3ForCausalLM(MindSporeModelBase):
             "FlashAttentionScore,PagedAttention"
         )
         os.environ["MS_DISABLE_INTERNAL_KERNELS_LIST"] = "RmsNorm"
+        if is_310p():
+            os.environ["MS_ENABLE_INTERNAL_BOOST"] = "off"
 
     def set_model_inputs(self, is_prefill):
         dyn_input_ids = Tensor(shape=[None], dtype=dtype.int32)
@@ -552,6 +561,27 @@ class Qwen3ForCausalLM(MindSporeModelBase):
                     else:
                         param.set_data(tensor_torch2ms(weight).move_to("Ascend"))
                     # Make sure the weight is loaded on device, so the kv cache calculation is correct.
+
+        def adjust_weight(params_dict):
+            target_keywords = [
+                "qkv_proj.weight",
+                "o_proj.weight",
+                "gate_up_proj.weight",
+                "down_proj.weight",
+                "lm_head.weight",
+            ]
+
+            for name, param in params_dict.items():
+                if any(name.endswith(keyword) for keyword in target_keywords):
+                    cast_weight = format_cast(param, "nz")
+                    ms.runtime.synchronize()
+                    param.set_data(cast_weight)
+
+        if is_310p():
+            ms.runtime.synchronize()
+            print(param_dict.keys())
+            adjust_weight(param_dict)
+            ms.runtime.synchronize()
 
     def construct(self, **model_inputs) -> Tensor:
         q_seq_lens = model_inputs["q_seq_lens"]
