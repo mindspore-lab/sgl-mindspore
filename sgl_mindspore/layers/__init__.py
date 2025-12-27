@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the SGLang project
 from sgl_mindspore.layers.activation import SwiGLU
-from sgl_mindspore.layers.attention import MsNativeAttnBackend
+from sgl_mindspore.layers.attention import MsNativeAttnBackend, MsNativeAttnBackendRadix
 from sgl_mindspore.layers.linear import (
     ColParallelLinear,
     MLPColParallelLinear,

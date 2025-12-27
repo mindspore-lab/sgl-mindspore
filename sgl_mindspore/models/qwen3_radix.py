@@ -25,7 +25,7 @@ from sgl_mindspore.layers import (
     BaseRotaryEmbedding,
     ColParallelLinear,
     MLPColParallelLinear,
-    MsNativeAttnBackend,
+    MsNativeAttnBackendRadix,
     QKVParallelLinear,
     RMSNorm,
     RowParallelLinear,
@@ -187,7 +187,7 @@ class Qwen3Attention(nn.Cell):
         self.q_size = self.total_num_heads * self.head_dim
         self.kv_size = self.total_num_kv_heads * self.head_dim
 
-        self.attn = MsNativeAttnBackend(
+        self.attn = MsNativeAttnBackendRadix(
             self.local_num_heads,
             self.head_dim,
             self.local_num_kv_heads,
@@ -260,6 +260,11 @@ class Qwen3Attention(nn.Cell):
         value_cache: Tensor,
         out_cache_loc: Tensor,
         block_tables: Tensor,
+        req_to_token: Tensor,
+        req_pool_indices: Tensor,
+        seq_lens: Tensor,
+        extend_prefix_lens: Tensor,
+        extend_seq_lens: Tensor,
     ) -> Tensor:
         token_lens, hidden_dim = hidden_state.shape
 
@@ -288,30 +293,29 @@ class Qwen3Attention(nn.Cell):
             is_prefill=is_prefill,
         )
 
-        key_out = self.attn(
+        key_cache, value_cache = self.attn(
             k,
             v,
             key_cache=key_cache,
             value_cache=value_cache,
             out_cache_loc=out_cache_loc,
         )
-        q = ops.depend(q, key_out)
 
+        key_cache = key_cache.reshape(key_cache.shape[0], 8, 128)
+        value_cache = value_cache.reshape(value_cache.shape[0], 8, 128)
+        q = q.reshape(q.shape[0], 32, 128)
+        L, S = q.shape[-2], key_cache.shape[-2]
+        attn_bias = np.zeros((L,S), dtype=np.float16)
         if is_prefill:
             attn_output = self.attn.extend(
-                q, k, v, attn_mask, None, None, None, q_seq_lens, batch_valid_length
+                key_cache, value_cache, q, req_to_token, req_pool_indices, seq_lens, extend_prefix_lens, extend_seq_lens, None, attn_bias
             )
         else:
+            attn_bias = ms.Tensor(attn_bias, dtype=ms.float16)
             attn_output = self.attn.decode(
-                q,
-                batch_valid_length,
-                attn_mask,
-                q_seq_lens,
-                key_cache,
-                value_cache,
-                block_tables,
+                key_cache, value_cache, q, req_to_token, req_pool_indices, seq_lens, extend_prefix_lens, extend_seq_lens, None, attn_bias
             )
-
+        attn_output = attn_output.reshape(attn_output.shape[0], 4096)
         output = self.o_proj(attn_output).view(token_lens, -1)
         return output
 
@@ -362,6 +366,11 @@ class Qwen3DecoderLayer(nn.Cell):
         value_cache: Tensor,
         out_cache_loc: Tensor,
         block_tables: Tensor,
+        req_to_token: Tensor,
+        req_pool_indices: Tensor,
+        seq_lens: Tensor,
+        extend_prefix_lens: Tensor,
+        extend_seq_lens: Tensor,
     ) -> Tuple[Tensor, Tensor]:
         if residual is None:
             residual = hidden_state
@@ -380,6 +389,11 @@ class Qwen3DecoderLayer(nn.Cell):
             value_cache=value_cache,
             out_cache_loc=out_cache_loc,
             block_tables=block_tables,
+            req_to_token=req_to_token,
+            req_pool_indices=req_pool_indices,
+            seq_lens=seq_lens,
+            extend_prefix_lens=extend_prefix_lens,
+            extend_seq_lens=extend_seq_lens,
         )
         hidden_state, residual = self.post_attention_layernorm(hidden_state, residual)
         hidden_state = self.mlp(hidden_state)
@@ -440,6 +454,11 @@ class Qwen3Model(nn.Cell):
         value_cache=None,
         out_cache_loc=None,
         block_tables=None,
+        req_to_token=None,
+        req_pool_indices=None,
+        seq_lens=None,
+        extend_prefix_lens=None,
+        extend_seq_lens=None,
     ):
         """
         Forward of qwen model.
@@ -461,6 +480,11 @@ class Qwen3Model(nn.Cell):
                 value_cache=value_cache[i],
                 out_cache_loc=out_cache_loc,
                 block_tables=block_tables,
+                req_to_token=req_to_token,
+                req_pool_indices=req_pool_indices,
+                seq_lens=seq_lens,
+                extend_prefix_lens=extend_prefix_lens,
+                extend_seq_lens=extend_seq_lens,
             )
 
         hidden_state, _ = self.norm(hidden_state, residual)
@@ -483,7 +507,7 @@ class GatherLastDim(nn.Cell):
         return output
 
 
-class Qwen3ForCausalLM(MindSporeModelBase):
+class Qwen3ForCausalLMRadix(MindSporeModelBase):
     def __init__(
         self,
         config: Qwen3Config,
@@ -526,13 +550,14 @@ class Qwen3ForCausalLM(MindSporeModelBase):
         if is_310p():
             os.environ["MS_ENABLE_INTERNAL_BOOST"] = "off"
 
-    def set_model_inputs(self, is_prefill):
+    def set_model_inputs(self, is_prefill, max_context_len):
         dyn_input_ids = Tensor(shape=[None], dtype=dtype.int32)
         dyn_position_ids = Tensor(shape=[None], dtype=dtype.int64)
 
         head_size = self.config.head_dim
+        num_kv_heads = self.config.num_key_value_heads
         # use pa, if use ifa, the shape should (None, None, head_size)
-        kv_cache_shape = (None, None, None, head_size)
+        kv_cache_shape = (None, num_kv_heads * head_size)
 
         kv_cache_dtype = self.config.param_dtype
 
@@ -578,6 +603,11 @@ class Qwen3ForCausalLM(MindSporeModelBase):
             value_cache=dyn_value_caches,
             out_cache_loc=dyn_out_cache_loc,
             block_tables=dyn_block_tables,
+            req_to_token=Tensor(shape=[None, max_context_len], dtype=dtype.int32),
+            req_pool_indices=Tensor(shape=[1], dtype=dtype.int32),
+            seq_lens=Tensor(shape=[1], dtype=dtype.int32),
+            extend_prefix_lens=Tensor(shape=[1], dtype=dtype.int32),
+            extend_seq_lens=Tensor(shape=[1],dtype=dtype.int32),
         )
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
@@ -635,12 +665,26 @@ class Qwen3ForCausalLM(MindSporeModelBase):
             adjust_weight(param_dict)
             ms.runtime.synchronize()
 
+    def prepare_inputs(self, forward_batch, model_inputs):
+        model_inputs["req_to_token"] = tensor_torch2ms(forward_batch.req_to_token_pool.req_to_token)
+        model_inputs["req_pool_indices"] = tensor_torch2ms(forward_batch.req_pool_indices).to(ms.int32)
+        model_inputs["seq_lens"] = tensor_torch2ms(forward_batch.seq_lens).to(ms.int32)
+        is_prefill = model_inputs["is_prefill"]
+        if is_prefill:
+            model_inputs["extend_prefix_lens"] = tensor_torch2ms(forward_batch.extend_prefix_lens)
+            model_inputs["extend_seq_lens"] = tensor_torch2ms(forward_batch.extend_seq_lens)
+        else:
+            model_inputs["extend_prefix_lens"] = mint.ones(forward_batch.batch_size, dtype = ms.int32)
+            model_inputs["extend_seq_lens"] = model_inputs["batch_valid_length"] - model_inputs["extend_seq_lens"]
+        return model_inputs
+
     def construct(self, **model_inputs) -> Tensor:
         q_seq_lens = model_inputs["q_seq_lens"]
         is_prefill = model_inputs["is_prefill"]
+        max_context_len = model_inputs['req_to_token'].shape[1]
 
         if self.prev_prefill != is_prefill:
-            self.set_model_inputs(is_prefill)
+            self.set_model_inputs(is_prefill, max_context_len)
         self.prev_prefill = is_prefill
 
         if is_prefill:
@@ -661,4 +705,4 @@ class Qwen3ForCausalLM(MindSporeModelBase):
         return logits
 
 
-EntryClass = Qwen3ForCausalLM
+EntryClass = Qwen3ForCausalLMRadix
