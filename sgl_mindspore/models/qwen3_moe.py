@@ -4,7 +4,7 @@ import logging
 import math
 import os
 from functools import lru_cache
-from typing import Iterable, Optional, Tuple, Type, Union
+from typing import Any, Iterable, Optional, Tuple, Type, Union
 
 import mindspore as ms
 import mindspore.common.dtype as mstype
@@ -19,14 +19,16 @@ from sglang.srt.distributed import (
     get_tp_group,
 )
 from sglang.srt.distributed.utils import divide
-from sglang.srt.layers.dp_attention import get_attention_tp_rank, get_attention_tp_size
 from sglang.srt.eplb.expert_location import ModelConfigForExpertLocation
+from sglang.srt.layers.communicator import LayerScatterModes
+from sglang.srt.layers.dp_attention import get_attention_tp_rank, get_attention_tp_size
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 
 from sgl_mindspore.layers import (
     BaseRotaryEmbedding,
     ColParallelLinear,
     FusedMoe,
+    MindsporeLayerCommunicator,
     MLPColParallelLinear,
     MoeReplicatedLinear,
     MsNativeAttnBackend,
@@ -38,7 +40,11 @@ from sgl_mindspore.layers import (
     YaRNScalingRotaryEmbedding,
 )
 from sgl_mindspore.models.mindspore_model_base import MindSporeModelBase
-from sgl_mindspore.utils import _get_tp_group_name, tensor_torch2ms
+from sgl_mindspore.utils import (
+    _get_attn_tp_group_name,
+    _get_tp_group_name,
+    tensor_torch2ms,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -203,6 +209,7 @@ class Qwen3MoeAttention(nn.Cell):
             output_size=self.hidden_size,
             param_dtype=self.param_dtype,
             bias=config.attention_bias,
+            reduce_results=False,
             tp_rank=attn_tp_rank,
             tp_size=attn_tp_size,
         )
@@ -319,6 +326,17 @@ class Qwen3MoeDecoderLayer(nn.Cell):
             eps=config.rms_norm_eps,
             param_dtype=config.param_dtype,
         )
+        self.layer_scatter_modes = LayerScatterModes.init_new(
+            num_layers=config.num_hidden_layers,
+            layer_id=layer_idx,
+            is_layer_sparse=False,
+            is_previous_layer_sparse=False,
+        )
+        self.layer_communicator = MindsporeLayerCommunicator(
+            layer_scatter_modes=self.layer_scatter_modes,
+            input_layernorm=self.input_layernorm,
+            post_attention_layernorm=self.post_attention_layernorm,
+        )
 
     def construct(
         self,
@@ -334,28 +352,32 @@ class Qwen3MoeDecoderLayer(nn.Cell):
         value_cache: Tensor,
         out_cache_loc: Tensor,
         block_tables: Tensor,
+        dp_attn_info: dict[str, Any],
     ) -> Tuple[Tensor, Tensor]:
-        if residual is None:
-            residual = hidden_state
-            hidden_state = self.input_layernorm(hidden_state)
-        else:
-            hidden_state, residual = self.input_layernorm(hidden_state, residual)
-        hidden_state = self.self_attn(
-            hidden_state=hidden_state,
-            positions=positions,
-            batch_valid_length=batch_valid_length,
-            is_prefill=is_prefill,
-            layer_idx=layer_idx,
-            attn_mask=attn_mask,
-            q_seq_lens=q_seq_lens,
-            key_cache=key_cache,
-            value_cache=value_cache,
-            out_cache_loc=out_cache_loc,
-            block_tables=block_tables,
+        hidden_state, residual = self.layer_communicator.prepare_attn(
+            hidden_state, residual
         )
-        hidden_state, residual = self.post_attention_layernorm(hidden_state, residual)
+        if hidden_state.size > 0:
+            hidden_state = self.self_attn(
+                hidden_state=hidden_state,
+                positions=positions,
+                batch_valid_length=batch_valid_length,
+                is_prefill=is_prefill,
+                layer_idx=layer_idx,
+                attn_mask=attn_mask,
+                q_seq_lens=q_seq_lens,
+                key_cache=key_cache,
+                value_cache=value_cache,
+                out_cache_loc=out_cache_loc,
+                block_tables=block_tables,
+            )
+        hidden_state, residual = self.layer_communicator.prepare_mlp(
+            hidden_state, residual, dp_attn_info
+        )
         hidden_state = self.mlp(hidden_state)
-
+        hidden_state, residual = self.layer_communicator.postprocess_layer(
+            hidden_state, residual, dp_attn_info
+        )
         return hidden_state, residual
 
 
@@ -401,12 +423,22 @@ class Qwen3MoeModel(nn.Cell):
         value_cache=None,
         out_cache_loc=None,
         block_tables=None,
+        global_num_tokens_gpu=None,
+        gathered_buffer=None,
+        input_len=None,
+        is_max_len=None,
     ):
         """
         Forward of qwen model.
         """
         hidden_state = self.embed_tokens(input_ids)
         residual = None
+        dp_attn_info = {
+            "global_num_tokens_gpu": global_num_tokens_gpu,
+            "gathered_buffer": gathered_buffer,
+            "input_len": input_len,
+            "is_max_len": is_max_len,
+        }
         for i in range(self.num_hidden_layers):
             layer = self.layers[i]
             hidden_state, residual = layer(
@@ -422,6 +454,7 @@ class Qwen3MoeModel(nn.Cell):
                 value_cache=value_cache[i],
                 out_cache_loc=out_cache_loc,
                 block_tables=block_tables,
+                dp_attn_info=dp_attn_info,
             )
 
         hidden_state, _ = self.norm(hidden_state, residual)
@@ -432,9 +465,9 @@ class Qwen3MoeModel(nn.Cell):
 class GatherLastDim(nn.Cell):
     def __init__(self):
         super().__init__()
-        tp_group_name = _get_tp_group_name()
+        tp_group_name = _get_attn_tp_group_name()
         self.all_gather = ops.AllGather(group=tp_group_name)
-        self.world_size = get_tensor_model_parallel_world_size()
+        self.world_size = get_attention_tp_size()
         self.split = ops.Split(axis=0, output_num=self.world_size)
 
     def construct(self, input: Tensor) -> Tensor:
@@ -463,6 +496,8 @@ class Qwen3MoeForCausalLM(MindSporeModelBase):
             output_size=self.config.vocab_size,
             param_dtype=self.config.param_dtype,
             bias=False,
+            tp_rank=get_attention_tp_rank(),
+            tp_size=get_attention_tp_size(),
         )
         self.all_gather = GatherLastDim()
 
@@ -473,6 +508,9 @@ class Qwen3MoeForCausalLM(MindSporeModelBase):
         os.environ["MS_DISABLE_INTERNAL_KERNELS_LIST"] = "RmsNorm"
 
     def set_model_inputs(self, is_prefill):
+        """
+        Overrides base class method if the input args are different.
+        """
         dyn_input_ids = Tensor(shape=[None], dtype=dtype.int32)
         dyn_position_ids = Tensor(shape=[None], dtype=dtype.int64)
 
@@ -513,6 +551,19 @@ class Qwen3MoeForCausalLM(MindSporeModelBase):
         dyn_block_tables = Tensor(shape=[None, None], dtype=dtype.int32)
         # dyn_intermediate_tensors = None
         # dyn_inputs_embeds = None
+        dyn_global_num_tokens_gpu = Tensor(
+            shape=[
+                None,
+            ],
+            dtype=dtype.int64,
+        )
+        dyn_gathered_buffer = Tensor(
+            shape=[None, None],
+            dtype=self.config.param_dtype,
+        )
+        dyn_input_len = mutable(0)
+        dyn_is_max_len = mutable(True)
+
         self.model.set_inputs(
             input_ids=dyn_input_ids,
             position_ids=dyn_position_ids,
@@ -524,6 +575,10 @@ class Qwen3MoeForCausalLM(MindSporeModelBase):
             value_cache=dyn_value_caches,
             out_cache_loc=dyn_out_cache_loc,
             block_tables=dyn_block_tables,
+            global_num_tokens_gpu=dyn_global_num_tokens_gpu,
+            gathered_buffer=dyn_gathered_buffer,
+            input_len=dyn_input_len,
+            is_max_len=dyn_is_max_len,
         )
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):

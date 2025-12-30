@@ -3,14 +3,16 @@
 import mindspore as ms
 import torch
 import torch_npu
+from mindspore._c_expression import MSContext
 from mindspore.utils.dlpack import from_dlpack as ms_from_dlpack
 from mindspore.utils.dlpack import to_dlpack as ms_to_dlpack
-from mindspore._c_expression import MSContext
 from sglang.srt.distributed import get_tp_group, get_world_group
+from sglang.srt.layers.dp_attention import get_attention_tp_group
+
 
 def is_910b():
     device = MSContext.get_instance().get_ascend_soc_version()
-    return device in ['910b', 'ascend910b']
+    return device in ["910b", "ascend910b"]
 
 
 def tensor_torch2ms(x: torch.Tensor):
@@ -53,6 +55,10 @@ def split_loaded_weight(loaded_weight, shard_dim, start_idx, shard_size):
 
 def _get_tp_group_name():
     return get_tp_group().unique_name
+
+
+def _get_attn_tp_group_name():
+    return get_attention_tp_group().unique_name
 
 
 def _get_world_group_name():
