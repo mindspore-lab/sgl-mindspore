@@ -244,6 +244,16 @@ class LlamaForCausalLMEagle3(Qwen3ForCausalLM):
             (".gate_up_proj", ".up_proj", "up"),
         ]
 
+        direct_params_mapping = [
+            (".self_attn.o_proj", ".self_attn.o_proj"),
+            (".mlp.down_proj", ".mlp.down_proj"),
+            (".hidden_norm", ".hidden_norm"),
+            (".input_layernorm", ".input_layernorm"),
+            (".post_attention_layernorm", ".post_attention_layernorm"),
+            (".norm", ".norm"),
+            (".fc", ".fc"),
+        ]
+
         for name, weight in weights:
             if "d2t" in name:
                 # d2t stores diffs between draft id and target id
@@ -257,9 +267,11 @@ class LlamaForCausalLMEagle3(Qwen3ForCausalLM):
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
-                name = name.replace(weight_name, param_name)
-                if name in param_dict:
-                    param = param_dict[name]
+                mapped_name = name.replace(weight_name, param_name)
+                if not mapped_name.startswith("model."):
+                    mapped_name = "model." + mapped_name
+                if mapped_name in param_dict:
+                    param = param_dict[mapped_name]
                     assert hasattr(param, "weight_load")
                     weight_load = getattr(param, "weight_load")
                     weight_load(param, weight, shard_id)
@@ -275,6 +287,9 @@ class LlamaForCausalLMEagle3(Qwen3ForCausalLM):
                     else:
                         param.set_data(tensor_torch2ms(weight).move_to("Ascend"))
                     # Make sure the weight is loaded on device, so the kv cache calculation is correct.
+
+    def get_hot_token_id(self):
+        return self.hot_token_id
 
     def prepare_inputs(self, forward_batch: ForwardBatch, model_inputs: Dict[str, Any]):
         if forward_batch.spec_info:
