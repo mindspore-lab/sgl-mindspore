@@ -15,11 +15,15 @@ class MindSporeModelBase(ms.nn.Cell):
         raise NotImplementedError
 
     def prepare_inputs(
-        self, forward_batch: ForwardBatch, model_inputs: Dict
+        self, forward_batch: ForwardBatch, model_inputs: Dict[str, Any]
     ) -> ms.Tensor:
         return model_inputs
 
-    def set_model_inputs(self, use_fa):
+    def set_model_inputs(self, is_prefill: bool):
+        """
+        Set shared inputs for all models. If the derived model has additional inputs,
+        it should override this method and call super().set_model_inputs(is_prefill)
+        """
         dyn_input_ids = Tensor(shape=[None], dtype=dtype.int32)
         dyn_position_ids = Tensor(shape=[None], dtype=dtype.int64)
 
@@ -60,15 +64,16 @@ class MindSporeModelBase(ms.nn.Cell):
         dyn_block_tables = Tensor(shape=[None, None], dtype=dtype.int32)
         # dyn_intermediate_tensors = None
         # dyn_inputs_embeds = None
-        self.model.set_inputs(
-            input_ids=dyn_input_ids,
-            position_ids=dyn_position_ids,
-            attention_mask=dynamic_attention_mask,
-            batch_valid_length=dyn_batch_valid_length,
-            is_prefill=use_fa,
-            q_seq_lens=dyn_q_seq_lens,
-            key_cache=dyn_key_caches,
-            value_cache=dyn_value_caches,
-            out_cache_loc=dyn_out_cache_loc,
-            block_tables=dyn_block_tables,
-        )
+        model_inputs = {
+            "input_ids": dyn_input_ids,
+            "position_ids": dyn_position_ids,
+            "attention_mask": dynamic_attention_mask,
+            "batch_valid_length": dyn_batch_valid_length,
+            "is_prefill": is_prefill,
+            "q_seq_lens": dyn_q_seq_lens,
+            "key_cache": dyn_key_caches,
+            "value_cache": dyn_value_caches,
+            "out_cache_loc": dyn_out_cache_loc,
+            "block_tables": dyn_block_tables,
+        }
+        self.model.set_inputs(kwargs=model_inputs)

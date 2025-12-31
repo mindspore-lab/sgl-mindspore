@@ -1,28 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the SGLang project
 import logging
-import math
 import os
 from functools import lru_cache
-from typing import Any, Iterable, Optional, Tuple, Type, Union
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 import mindspore as ms
-import mindspore.common.dtype as mstype
-import mindspore.ops.operations as P
-import numpy as np
 import torch
-from mindspore import Parameter, Tensor, dtype, jit, mint, mutable, nn, ops
+from mindspore import Tensor, dtype, jit, mint, mutable, nn, ops
 from sglang.srt.distributed import (
     get_moe_expert_parallel_world_size,
-    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
-    get_tp_group,
 )
 from sglang.srt.distributed.utils import divide
 from sglang.srt.eplb.expert_location import ModelConfigForExpertLocation
 from sglang.srt.layers.communicator import LayerScatterModes
-from sglang.srt.layers.dp_attention import get_attention_tp_rank, get_attention_tp_size
+from sglang.srt.layers.dp_attention import (
+    get_attention_tp_rank,
+    get_attention_tp_size,
+    is_dp_attention_enabled,
+)
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
+from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 
 from sgl_mindspore.layers import (
     BaseRotaryEmbedding,
@@ -40,11 +39,7 @@ from sgl_mindspore.layers import (
     YaRNScalingRotaryEmbedding,
 )
 from sgl_mindspore.models.mindspore_model_base import MindSporeModelBase
-from sgl_mindspore.utils import (
-    _get_attn_tp_group_name,
-    _get_tp_group_name,
-    tensor_torch2ms,
-)
+from sgl_mindspore.utils import _get_attn_tp_group_name, tensor_torch2ms
 
 logger = logging.getLogger(__name__)
 
@@ -507,50 +502,8 @@ class Qwen3MoeForCausalLM(MindSporeModelBase):
         )
         os.environ["MS_DISABLE_INTERNAL_KERNELS_LIST"] = "RmsNorm"
 
-    def set_model_inputs(self, is_prefill):
-        """
-        Overrides base class method if the input args are different.
-        """
-        dyn_input_ids = Tensor(shape=[None], dtype=dtype.int32)
-        dyn_position_ids = Tensor(shape=[None], dtype=dtype.int64)
-
-        head_size = self.config.head_dim
-        # use pa, if use ifa, the shape should (None, None, head_size)
-        kv_cache_shape = (None, None, None, head_size)
-
-        kv_cache_dtype = self.config.param_dtype
-
-        num_layers = self.config.num_hidden_layers
-
-        dyn_key_cache = Tensor(shape=kv_cache_shape, dtype=kv_cache_dtype)
-        dyn_value_cache = Tensor(shape=kv_cache_shape, dtype=kv_cache_dtype)
-        dyn_key_caches = mutable([dyn_key_cache for _ in range(num_layers)])
-        dyn_value_caches = mutable([dyn_value_cache for _ in range(num_layers)])
-
-        dyn_out_cache_loc = Tensor(
-            shape=[
-                None,
-            ],
-            dtype=dtype.int32,
-        )
-        dynamic_attention_mask = Tensor(
-            shape=[None, None], dtype=self.config.param_dtype
-        )
-        dyn_batch_valid_length = Tensor(
-            shape=[
-                None,
-            ],
-            dtype=dtype.int32,
-        )
-        dyn_q_seq_lens = Tensor(
-            shape=[
-                None,
-            ],
-            dtype=dtype.int32,
-        )
-        dyn_block_tables = Tensor(shape=[None, None], dtype=dtype.int32)
-        # dyn_intermediate_tensors = None
-        # dyn_inputs_embeds = None
+    def set_model_inputs(self, is_prefill: bool):
+        super().set_model_inputs(is_prefill)
         dyn_global_num_tokens_gpu = Tensor(
             shape=[
                 None,
@@ -563,23 +516,14 @@ class Qwen3MoeForCausalLM(MindSporeModelBase):
         )
         dyn_input_len = mutable(0)
         dyn_is_max_len = mutable(True)
+        additional_inputs = {
+            "global_num_tokens_gpu": dyn_global_num_tokens_gpu,
+            "gathered_buffer": dyn_gathered_buffer,
+            "input_len": dyn_input_len,
+            "is_max_len": dyn_is_max_len,
+        }
 
-        self.model.set_inputs(
-            input_ids=dyn_input_ids,
-            position_ids=dyn_position_ids,
-            attention_mask=dynamic_attention_mask,
-            batch_valid_length=dyn_batch_valid_length,
-            is_prefill=is_prefill,
-            q_seq_lens=dyn_q_seq_lens,
-            key_cache=dyn_key_caches,
-            value_cache=dyn_value_caches,
-            out_cache_loc=dyn_out_cache_loc,
-            block_tables=dyn_block_tables,
-            global_num_tokens_gpu=dyn_global_num_tokens_gpu,
-            gathered_buffer=dyn_gathered_buffer,
-            input_len=dyn_input_len,
-            is_max_len=dyn_is_max_len,
-        )
+        self.model.set_inputs(kwargs=additional_inputs)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         param_dict = self.parameters_dict()
@@ -682,6 +626,25 @@ class Qwen3MoeForCausalLM(MindSporeModelBase):
             num_logical_experts=config.num_experts,
             num_groups=None,
         )
+
+    def prepare_inputs(self, forward_batch: ForwardBatch, model_inputs: Dict[str, Any]):
+        if is_dp_attention_enabled():
+            model_inputs["global_num_tokens_gpu"] = tensor_torch2ms(
+                forward_batch.global_num_tokens_gpu
+            )
+            # In graph mode, the model cannot read external buffers. Need to pass the buffer as model input.
+            buffer_len = int(sum(forward_batch.global_num_tokens_gpu))
+            model_inputs["dp_buffer"] = ms.mint.zeros(
+                (buffer_len, self.config.hidden_size), dtype=self.config.param_dtype
+            )
+            model_inputs["input_len"] = forward_batch.input_ids.shape[0]
+            model_inputs["is_max_len"] = forward_batch.dp_padding_mode.is_max_len()
+        else:
+            model_inputs["global_num_tokens_gpu"] = None
+            model_inputs["dp_buffer"] = None
+            model_inputs["input_len"] = None
+            model_inputs["is_max_len"] = None
+        return model_inputs
 
 
 EntryClass = Qwen3MoeForCausalLM
