@@ -562,7 +562,7 @@ class Qwen3ForCausalLM(MindSporeModelBase):
                         param.set_data(tensor_torch2ms(weight).move_to("Ascend"))
                     # Make sure the weight is loaded on device, so the kv cache calculation is correct.
 
-        def adjust_weight(params_dict):
+        def cast_weight_as_nz(params_dict):
             target_keywords = [
                 "qkv_proj.weight",
                 "o_proj.weight",
@@ -579,8 +579,7 @@ class Qwen3ForCausalLM(MindSporeModelBase):
 
         if is_310p():
             ms.runtime.synchronize()
-            print(param_dict.keys())
-            adjust_weight(param_dict)
+            cast_weight_as_nz(param_dict)
             ms.runtime.synchronize()
 
     def construct(self, **model_inputs) -> Tensor:
