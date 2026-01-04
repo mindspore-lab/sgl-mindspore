@@ -191,7 +191,7 @@ class MindsporeLayerCommunicator:
             and (output_mode == ScatterMode.TP_ATTN_FULL)
         ):
             hidden_states, global_hidden_states = (
-                dp_attn_info["gathered_buffer"][
+                dp_attn_info["dp_buffer"][
                     : dp_attn_info["input_len"]
                 ].contiguous(),
                 hidden_states,
@@ -275,7 +275,7 @@ class MindsporeLayerCommunicator:
 
         is partial: True if each attn tp rank has partial data and needs to be reduced first. If false, erase data for all ranks > 0.
         """
-        global_tokens = dp_attn_info["gathered_buffer"]
+        global_tokens = dp_attn_info["dp_buffer"]
         global_tokens.fill_(0)
         assert local_tokens.is_contiguous()
         assert global_tokens.is_contiguous()

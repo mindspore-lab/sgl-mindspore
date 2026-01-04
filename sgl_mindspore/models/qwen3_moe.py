@@ -324,8 +324,9 @@ class Qwen3MoeDecoderLayer(nn.Cell):
         self.layer_scatter_modes = LayerScatterModes.init_new(
             num_layers=config.num_hidden_layers,
             layer_id=layer_idx,
-            is_layer_sparse=False,
-            is_previous_layer_sparse=False,
+            is_layer_sparse=True,
+            is_previous_layer_sparse=True,
+            is_next_layer_sparse=True,
         )
         self.layer_communicator = MindsporeLayerCommunicator(
             layer_scatter_modes=self.layer_scatter_modes,
@@ -419,7 +420,7 @@ class Qwen3MoeModel(nn.Cell):
         out_cache_loc=None,
         block_tables=None,
         global_num_tokens_gpu=None,
-        gathered_buffer=None,
+        dp_buffer=None,
         input_len=None,
         is_max_len=None,
     ):
@@ -430,7 +431,7 @@ class Qwen3MoeModel(nn.Cell):
         residual = None
         dp_attn_info = {
             "global_num_tokens_gpu": global_num_tokens_gpu,
-            "gathered_buffer": gathered_buffer,
+            "dp_buffer": dp_buffer,
             "input_len": input_len,
             "is_max_len": is_max_len,
         }
@@ -510,20 +511,20 @@ class Qwen3MoeForCausalLM(MindSporeModelBase):
             ],
             dtype=dtype.int64,
         )
-        dyn_gathered_buffer = Tensor(
+        dyn_dp_buffer = Tensor(
             shape=[None, None],
             dtype=self.config.param_dtype,
         )
-        dyn_input_len = mutable(0)
-        dyn_is_max_len = mutable(True)
+        dyn_input_len = 0
+        dyn_is_max_len = True
         additional_inputs = {
             "global_num_tokens_gpu": dyn_global_num_tokens_gpu,
-            "gathered_buffer": dyn_gathered_buffer,
+            "dp_buffer": dyn_dp_buffer,
             "input_len": dyn_input_len,
             "is_max_len": dyn_is_max_len,
         }
 
-        self.model.set_inputs(kwargs=additional_inputs)
+        self.model.set_inputs(**additional_inputs)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         param_dict = self.parameters_dict()
@@ -640,10 +641,10 @@ class Qwen3MoeForCausalLM(MindSporeModelBase):
             model_inputs["input_len"] = forward_batch.input_ids.shape[0]
             model_inputs["is_max_len"] = forward_batch.dp_padding_mode.is_max_len()
         else:
-            model_inputs["global_num_tokens_gpu"] = None
-            model_inputs["dp_buffer"] = None
-            model_inputs["input_len"] = None
-            model_inputs["is_max_len"] = None
+            model_inputs["global_num_tokens_gpu"] = Tensor([], dtype=dtype.int64)
+            model_inputs["dp_buffer"] = Tensor([[]], dtype=self.config.param_dtype)
+            model_inputs["input_len"] = 0
+            model_inputs["is_max_len"] = True
         return model_inputs
 
 

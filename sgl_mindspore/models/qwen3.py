@@ -38,10 +38,10 @@ from sgl_mindspore.models.mindspore_model_base import MindSporeModelBase
 from sgl_mindspore.utils import (
     _get_tp_group_name,
     add_prefix,
-    get_ms_dtype,
-    tensor_torch2ms,
     format_cast,
-    is_310p
+    get_ms_dtype,
+    is_310p,
+    tensor_torch2ms,
 )
 
 logger = logging.getLogger(__name__)
@@ -541,7 +541,6 @@ class Qwen3ForCausalLM(MindSporeModelBase):
         else:
             self.model.phase = "increment"
 
-        model_inputs = self.prepare_inputs(model_inputs)
         hidden_state = self.model(**model_inputs)
 
         # TODO: In pure decode scenarios, cumsum and gather operations will be redundant .

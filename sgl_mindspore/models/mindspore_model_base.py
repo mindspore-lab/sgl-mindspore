@@ -76,4 +76,4 @@ class MindSporeModelBase(ms.nn.Cell):
             "out_cache_loc": dyn_out_cache_loc,
             "block_tables": dyn_block_tables,
         }
-        self.model.set_inputs(kwargs=model_inputs)
+        self.model.set_inputs(**model_inputs)
