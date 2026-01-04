@@ -10,6 +10,10 @@ from sglang.srt.distributed import get_tp_group, get_world_group
 from sglang.srt.layers.dp_attention import get_attention_tp_group
 
 
+FORMAT_TYPE = {
+    "nz": 29,  # TODO: need a variable or enum from mindspore to keep consistency
+}
+
 def is_910b():
     device = MSContext.get_instance().get_ascend_soc_version()
     return device in ["910b", "ascend910b"]
@@ -90,3 +94,18 @@ def add_prefix(name: str, prefix: str) -> str:
         The string `prefix.name` if prefix is non-empty, otherwise just `name`.
     """
     return name if not prefix else f"{prefix}.{name}"
+
+def format_cast(x: ms.Tensor, format: str):
+    if format in FORMAT_TYPE:
+        return ms.ops.auto_generate.format_cast(x, FORMAT_TYPE[format])
+    else:
+        raise ValueError(f"Unknown format {format}")
+
+def get_ascend_soc_version():
+    from mindspore._c_expression import MSContext
+
+    return MSContext.get_instance().get_ascend_soc_version()
+
+def is_310p():
+    device = get_ascend_soc_version()
+    return device in ["310p", "ascend310p"]
