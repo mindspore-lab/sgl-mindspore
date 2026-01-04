@@ -445,7 +445,7 @@ class Qwen3ForCausalLM(MindSporeModelBase):
             param_dtype = get_ms_dtype(self.config.dtype)
         else:
             param_dtype = ms.dtype.bfloat16
-        if param_dtype == ms.bfloat16 and is_310p:
+        if param_dtype == ms.bfloat16 and is_310p():
             param_dtype = ms.float16
             logger.warning(
                 "Ascend 310P does not support bfloat16, will convert to float16"
