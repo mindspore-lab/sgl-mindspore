@@ -370,7 +370,8 @@ class Qwen3MoeDecoderLayer(nn.Cell):
         hidden_state, residual = self.layer_communicator.prepare_mlp(
             hidden_state, residual, dp_attn_info
         )
-        hidden_state = self.mlp(hidden_state)
+        if hidden_state.size > 0:
+            hidden_state = self.mlp(hidden_state)
         hidden_state, residual = self.layer_communicator.postprocess_layer(
             hidden_state, residual, dp_attn_info
         )
@@ -452,8 +453,8 @@ class Qwen3MoeModel(nn.Cell):
                 block_tables=block_tables,
                 dp_attn_info=dp_attn_info,
             )
-
-        hidden_state, _ = self.norm(hidden_state, residual)
+        if hidden_state.size > 0:
+            hidden_state, _ = self.norm(hidden_state, residual)
 
         return hidden_state
 
@@ -615,8 +616,8 @@ class Qwen3MoeForCausalLM(MindSporeModelBase):
         hidden_state = mint.index_select(hidden_state, 0, q_seq_lens - 1)
 
         logits = self.lm_head(hidden_state)
-        logits = self.all_gather(logits)
-        logits = ops.cast(logits, dtype.float32)
+        if get_attention_tp_size() > 1:
+            logits = self.all_gather(logits)
         logits = mint.reshape(logits, (-1, logits.shape[-1]))
         return logits
 
