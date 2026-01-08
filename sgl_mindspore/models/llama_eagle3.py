@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the SGLang project
 
 """
-EAGLE-3 draft model for Qwen3 model
+EAGLE-3 draft model for Llama model
 
 Adapted from
 https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/models/llama_eagle3.py
@@ -27,18 +27,18 @@ from sgl_mindspore.layers import (
     RMSNorm,
     VocabParallelEmbedding,
 )
-from sgl_mindspore.models.qwen3 import Qwen3DecoderLayer, Qwen3ForCausalLM, Qwen3MLP
+from sgl_mindspore.models.llama import LlamaDecoderLayer, LlamaForCausalLM, LlamaMLP
 from sgl_mindspore.utils import get_ms_dtype, tensor_torch2ms
 
 logger = logging.getLogger(__name__)
 
-Qwen3Config = None
+LlamaConfig = None
 
 
-class Qwen3DecoderLayerEagle3(Qwen3DecoderLayer):
+class LlamaDecoderLayerEagle3(LlamaDecoderLayer):
     def __init__(
         self,
-        config: Qwen3Config,
+        config: LlamaConfig,
         layer_id: int = 0,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -56,7 +56,7 @@ class Qwen3DecoderLayerEagle3(Qwen3DecoderLayer):
             quant_config=quant_config,
             prefix=add_prefix("qkv_proj", prefix),
         )
-        self.mlp = Qwen3MLP(config, quant_config, prefix)
+        self.mlp = LlamaMLP(config, quant_config, prefix)
 
         self.hidden_norm = RMSNorm(
             norm_dim=config.hidden_size,
@@ -109,10 +109,10 @@ class Qwen3DecoderLayerEagle3(Qwen3DecoderLayer):
         return hidden_states, residual
 
 
-class Qwen3ModelEagle3(nn.Cell):
+class LlamaModelEagle3(nn.Cell):
     def __init__(
         self,
-        config: Qwen3Config,
+        config: LlamaConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
@@ -139,7 +139,7 @@ class Qwen3ModelEagle3(nn.Cell):
             prefix=add_prefix("fc", prefix),
         )
 
-        self.midlayer = Qwen3DecoderLayerEagle3(config, 0, quant_config, prefix)
+        self.midlayer = LlamaDecoderLayerEagle3(config, 0, quant_config, prefix)
 
         self.norm = RMSNorm(
             norm_dim=config.hidden_size,
@@ -194,10 +194,10 @@ class Qwen3ModelEagle3(nn.Cell):
         return hidden_states_to_logits, [hidden_states_to_aux]
 
 
-class LlamaForCausalLMEagle3(Qwen3ForCausalLM):
+class LlamaForCausalLMEagle3(LlamaForCausalLM):
     def __init__(
         self,
-        config: Qwen3Config,
+        config: LlamaConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
@@ -214,7 +214,7 @@ class LlamaForCausalLMEagle3(Qwen3ForCausalLM):
             param_dtype = ms.dtype.bfloat16
         setattr(self.config, "param_dtype", param_dtype)
 
-        self.model = Qwen3ModelEagle3(config, quant_config, add_prefix("model", prefix))
+        self.model = LlamaModelEagle3(config, quant_config, add_prefix("model", prefix))
 
         self.load_lm_head_from_target = False
         if self.config.tie_word_embeddings:
