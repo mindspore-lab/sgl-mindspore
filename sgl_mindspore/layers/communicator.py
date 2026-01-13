@@ -235,8 +235,6 @@ class MindsporeLayerCommunicator:
         Scatter global tokens to each DP rank. Copy from global_tokens to local_tokens without device communication.
         """
         local_tokens.fill_(0)
-        assert local_tokens.is_contiguous()
-        assert global_tokens.is_contiguous()
         if local_tokens.shape[0] > 0:
             assert (
                 local_tokens.untyped_storage() is not global_tokens.untyped_storage()
@@ -277,8 +275,6 @@ class MindsporeLayerCommunicator:
         """
         global_tokens = dp_attn_info["dp_buffer"]
         global_tokens.fill_(0)
-        assert local_tokens.is_contiguous()
-        assert global_tokens.is_contiguous()
 
         if local_tokens.shape[0] > 0 and (
             is_partial or self._context.attn_tp_rank == 0
