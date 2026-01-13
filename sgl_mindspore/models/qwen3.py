@@ -38,10 +38,10 @@ from sgl_mindspore.models.mindspore_model_base import MindSporeModelBase
 from sgl_mindspore.utils import (
     _get_tp_group_name,
     add_prefix,
-    get_ms_dtype,
-    tensor_torch2ms,
     format_cast,
-    is_310p
+    get_ms_dtype,
+    is_310p,
+    tensor_torch2ms,
 )
 
 logger = logging.getLogger(__name__)
@@ -473,60 +473,6 @@ class Qwen3ForCausalLM(MindSporeModelBase):
         os.environ["MS_DISABLE_INTERNAL_KERNELS_LIST"] = "RmsNorm"
         if is_310p():
             os.environ["MS_ENABLE_INTERNAL_BOOST"] = "off"
-
-    def set_model_inputs(self, is_prefill):
-        dyn_input_ids = Tensor(shape=[None], dtype=dtype.int32)
-        dyn_position_ids = Tensor(shape=[None], dtype=dtype.int64)
-
-        head_size = self.config.head_dim
-        # use pa, if use ifa, the shape should (None, None, head_size)
-        kv_cache_shape = (None, None, None, head_size)
-
-        kv_cache_dtype = self.config.param_dtype
-
-        num_layers = self.config.num_hidden_layers
-
-        dyn_key_cache = Tensor(shape=kv_cache_shape, dtype=kv_cache_dtype)
-        dyn_value_cache = Tensor(shape=kv_cache_shape, dtype=kv_cache_dtype)
-        dyn_key_caches = mutable([dyn_key_cache for _ in range(num_layers)])
-        dyn_value_caches = mutable([dyn_value_cache for _ in range(num_layers)])
-
-        dyn_out_cache_loc = Tensor(
-            shape=[
-                None,
-            ],
-            dtype=dtype.int32,
-        )
-        dynamic_attention_mask = Tensor(
-            shape=[None, None], dtype=self.config.param_dtype
-        )
-        dyn_batch_valid_length = Tensor(
-            shape=[
-                None,
-            ],
-            dtype=dtype.int32,
-        )
-        dyn_q_seq_lens = Tensor(
-            shape=[
-                None,
-            ],
-            dtype=dtype.int32,
-        )
-        dyn_block_tables = Tensor(shape=[None, None], dtype=dtype.int32)
-        # dyn_intermediate_tensors = None
-        # dyn_inputs_embeds = None
-        self.model.set_inputs(
-            input_ids=dyn_input_ids,
-            position_ids=dyn_position_ids,
-            attention_mask=dynamic_attention_mask,
-            batch_valid_length=dyn_batch_valid_length,
-            is_prefill=is_prefill,
-            q_seq_lens=dyn_q_seq_lens,
-            key_cache=dyn_key_caches,
-            value_cache=dyn_value_caches,
-            out_cache_loc=dyn_out_cache_loc,
-            block_tables=dyn_block_tables,
-        )
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         param_dict = self.parameters_dict()
