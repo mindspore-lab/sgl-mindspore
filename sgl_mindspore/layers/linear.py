@@ -320,6 +320,59 @@ class RowParallelLinear(LinearBase):
         return None
 
 
+class ReplicatedLinear(LinearBase):
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        bias: bool = True,
+        param_dtype: Optional[ms.dtype] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__(
+            input_size=input_size,
+            output_size=output_size,
+            bias=bias,
+            param_dtype=param_dtype,
+            quant_config=quant_config,
+            prefix=prefix,
+        )
+
+        self.param_dtype = param_dtype
+        self.enable_bias = bias
+
+        assert self.quant_method is not None
+        self.quant_method.create_weights(
+            layer=self,
+            input_size_per_partition=self.input_size,
+            output_partition_sizes=[self.output_size],
+            input_size=self.input_size,
+            output_size=self.output_size,
+            params_dtype=self.param_dtype,
+            weight_load=self.weight_load,
+        )
+
+        if self.enable_bias:
+            self.bias = Parameter(mint.zeros(self.output_size, dtype=self.param_dtype))
+            setattr(self.bias, "weight_load", self.weight_load)
+
+    def construct(self, input: Tensor) -> Tuple[Tensor, bool]:
+        bias = self.bias if self.enable_bias else None
+        x = self.quant_method.apply(self, input, bias)
+        return x
+
+    def weight_load(self, param: Tensor, weight: torch.Tensor) -> None:
+        if weight.dim() == 0:
+            weight = weight.reshape(1)
+        assert param.shape == weight.shape, (
+            f"Tried to load weights of size {weight.size()}"
+            f"to a parameter of size {param.size()}"
+        )
+        param.set_data(tensor_torch2ms(weight))
+        return None
+
+
 class MoeReplicatedLinear(nn.Cell):
     def __init__(
         self,

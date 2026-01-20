@@ -7,6 +7,7 @@ from sgl_mindspore.layers.linear import (
     MLPColParallelLinear,
     MoeReplicatedLinear,
     QKVParallelLinear,
+    ReplicatedLinear,
     RowParallelLinear,
 )
 from sgl_mindspore.layers.moe import *

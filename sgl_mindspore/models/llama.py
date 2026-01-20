@@ -18,7 +18,6 @@ from sglang.srt.distributed import (
     get_tp_group,
 )
 from sglang.srt.distributed.utils import divide
-from sglang.srt.layers.dp_attention import get_attention_tp_rank, get_attention_tp_size
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 
 from sgl_mindspore.layers import (
@@ -40,16 +39,14 @@ from sgl_mindspore.utils import (
     add_prefix,
     get_ms_dtype,
     tensor_torch2ms,
-    format_cast,
-    is_310p
 )
 
 logger = logging.getLogger(__name__)
 
-Qwen3Config = None
+LlamaConfig = None
 
 
-class Qwen3MLP(nn.Cell):
+class LlamaMLP(nn.Cell):
     def __init__(
         self,
         config,
@@ -87,7 +84,8 @@ class Qwen3MLP(nn.Cell):
         x = self.down_proj(x)
         return x
 
-class Qwen3Attention(nn.Cell):
+
+class LlamaAttention(nn.Cell):
     def __init__(
         self,
         config,
@@ -96,18 +94,23 @@ class Qwen3Attention(nn.Cell):
     ) -> None:
         super().__init__()
 
-        attn_tp_rank = get_attention_tp_rank()
-        attn_tp_size = get_attention_tp_size()
-        self.attn_tp_size = attn_tp_size
         self.tp_size = get_tensor_model_parallel_world_size()
         self.hidden_size = config.hidden_size
         self.total_num_heads = config.num_attention_heads
+        assert self.total_num_heads % self.tp_size == 0
+        self.num_heads = self.total_num_heads // self.tp_size
         self.total_num_kv_heads = config.num_key_value_heads
-        assert self.total_num_heads % attn_tp_size == 0
+        if self.total_num_kv_heads >= self.tp_size:
+            assert self.total_num_kv_heads % self.tp_size == 0
+        else:
+            assert self.tp_size % self.total_num_kv_heads == 0
+        self.num_kv_heads = max(1, self.total_num_kv_heads // self.tp_size)
         if hasattr(config, "head_dim"):
             self.head_dim = config.head_dim
         else:
-            self.head_dim = config.hidden_size // self.total_num_heads
+            self.head_dim = config.hidden_size // self.num_heads
+        self.q_size = self.head_dim * self.num_heads
+        self.kv_size = self.head_dim * self.num_kv_heads
         self.scaling = float(self.head_dim**-0.5)
         self.rope_theta = int(config.rope_theta)
         self.param_dtype = config.param_dtype
@@ -121,23 +124,10 @@ class Qwen3Attention(nn.Cell):
         else:
             self.rope_type = "default_rope"
 
-        self.local_num_heads = self.total_num_heads // attn_tp_size
-        if self.total_num_kv_heads >= attn_tp_size:
-            assert self.total_num_kv_heads % attn_tp_size == 0
-            self.local_num_kv_heads = self.total_num_kv_heads // attn_tp_size
-        else:
-            assert attn_tp_size % self.total_num_kv_heads == 0
-            self.local_num_kv_heads = 1
-
-        self.local_q_size = self.local_num_heads * self.head_dim
-        self.local_kv_size = self.local_num_kv_heads * self.head_dim
-        self.q_size = self.total_num_heads * self.head_dim
-        self.kv_size = self.total_num_kv_heads * self.head_dim
-
         self.attn = MsNativeAttnBackend(
-            self.local_num_heads,
+            self.num_heads,
             self.head_dim,
-            self.local_num_kv_heads,
+            self.num_kv_heads,
         )
 
         self.qkv_proj = QKVParallelLinear(
@@ -149,30 +139,14 @@ class Qwen3Attention(nn.Cell):
             param_dtype=self.param_dtype,
             quant_config=quant_config,
             prefix=add_prefix("qkv_proj", prefix),
-            tp_rank=attn_tp_rank,
-            tp_size=attn_tp_size,
-        )
-        self.q_norm = RMSNorm(
-            norm_dim=config.head_dim,
-            eps=config.rms_norm_eps,
-            param_dtype=config.param_dtype,
-            prefix=add_prefix("q_norm", prefix),
-        )
-        self.k_norm = RMSNorm(
-            norm_dim=config.head_dim,
-            eps=config.rms_norm_eps,
-            param_dtype=config.param_dtype,
-            prefix=add_prefix("k_norm", prefix),
         )
         self.o_proj = RowParallelLinear(
-            input_size=self.q_size,
+            input_size=self.total_num_heads * self.head_dim,
             output_size=self.hidden_size,
             param_dtype=self.param_dtype,
             bias=config.attention_bias,
             quant_config=quant_config,
             prefix=add_prefix("o_proj", prefix),
-            tp_rank=attn_tp_rank,
-            tp_size=attn_tp_size,
         )
         self.rotary_emb = None
         if self.rope_type == "yarn":
@@ -213,19 +187,16 @@ class Qwen3Attention(nn.Cell):
         qkv = self.qkv_proj(hidden_states)
         q, k, v = qkv.split(
             [
-                self.local_q_size,
-                self.local_kv_size,
-                self.local_kv_size,
+                self.q_size,
+                self.kv_size,
+                self.kv_size,
             ],
             dim=-1,
         )
 
-        q = q.view(-1, self.head_dim).contiguous()
-        k = k.view(-1, self.head_dim).contiguous()
-        v = v.view(-1, self.local_kv_size).contiguous()
-
-        q = self.q_norm(q).view(-1, self.local_q_size)
-        k = self.k_norm(k).view(-1, self.local_kv_size)
+        q = q.contiguous()
+        k = k.contiguous()
+        v = v.contiguous()
 
         q, k = self.rotary_emb(
             positions,
@@ -246,7 +217,15 @@ class Qwen3Attention(nn.Cell):
 
         if is_prefill:
             attn_output = self.attn.extend(
-                q, k, v, attn_mask, None, None, None, q_seq_lens, batch_valid_length
+                q,
+                k,
+                v,
+                attn_mask,
+                None,
+                None,
+                None,
+                batch_valid_length,
+                batch_valid_length,
             )
         else:
             attn_output = self.attn.decode(
@@ -263,7 +242,7 @@ class Qwen3Attention(nn.Cell):
         return output
 
 
-class Qwen3DecoderLayer(nn.Cell):
+class LlamaDecoderLayer(nn.Cell):
     def __init__(
         self,
         config,
@@ -274,12 +253,12 @@ class Qwen3DecoderLayer(nn.Cell):
 
         self.hidden_size = config.hidden_size
 
-        self.self_attn = Qwen3Attention(
+        self.self_attn = LlamaAttention(
             config=config,
             quant_config=quant_config,
             prefix=add_prefix("self_attn", prefix),
         )
-        self.mlp = Qwen3MLP(
+        self.mlp = LlamaMLP(
             config=config, quant_config=quant_config, prefix=add_prefix("mlp", prefix)
         )
         self.input_layernorm = RMSNorm(
@@ -334,9 +313,9 @@ class Qwen3DecoderLayer(nn.Cell):
         return hidden_states, residual
 
 
-class Qwen3Model(nn.Cell):
+class LlamaModel(nn.Cell):
     r"""
-    qwen3 model
+    llama model
     """
 
     def __init__(
@@ -360,7 +339,7 @@ class Qwen3Model(nn.Cell):
         self.layers_to_capture = []
 
         for i in range(self.num_hidden_layers):
-            layer = Qwen3DecoderLayer(
+            layer = LlamaDecoderLayer(
                 config=config,
                 quant_config=quant_config,
                 prefix=add_prefix(f"layers.{i}", prefix),
@@ -390,7 +369,7 @@ class Qwen3Model(nn.Cell):
         block_tables=None,
     ):
         """
-        Forward of qwen model.
+        Forward of llama model.
         """
         hidden_states = self.embed_tokens(input_ids)
         residual = None
@@ -439,10 +418,10 @@ class GatherLastDim(nn.Cell):
         return output
 
 
-class Qwen3ForCausalLM(MindSporeModelBase):
+class LlamaForCausalLM(MindSporeModelBase):
     def __init__(
         self,
-        config: Qwen3Config,
+        config: LlamaConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
@@ -454,13 +433,8 @@ class Qwen3ForCausalLM(MindSporeModelBase):
             param_dtype = get_ms_dtype(self.config.dtype)
         else:
             param_dtype = ms.dtype.bfloat16
-        if param_dtype == ms.bfloat16 and is_310p():
-            param_dtype = ms.float16
-            logger.warning(
-                "Ascend 310P does not support bfloat16, will convert to float16"
-            )
         setattr(self.config, "param_dtype", param_dtype)
-        self.model = Qwen3Model(
+        self.model = LlamaModel(
             self.config, quant_config=quant_config, prefix=add_prefix("model", prefix)
         )
 
@@ -471,20 +445,17 @@ class Qwen3ForCausalLM(MindSporeModelBase):
             bias=False,
             prefix=add_prefix("lm_head", prefix),
         )
-        self.lm_head.construct = jit(self.lm_head.construct)
         self.tp_size = get_tensor_model_parallel_world_size()
         self.all_gather = GatherLastDim()
 
         # For EAGLE3 support
         self.capture_aux_hidden_states = False
 
-        # for best performance of MindSpore for Qwen3
+        # for best performance of MindSpore for Llama
         os.environ["MS_INTERNAL_DISABLE_CUSTOM_KERNEL_LIST"] = (
             "FlashAttentionScore,PagedAttention"
         )
         os.environ["MS_DISABLE_INTERNAL_KERNELS_LIST"] = "RmsNorm"
-        if is_310p():
-            os.environ["MS_ENABLE_INTERNAL_BOOST"] = "off"
 
     def prepare_inputs(self, forward_batch, model_inputs):
         if forward_batch.capture_hidden_mode:
@@ -579,26 +550,6 @@ class Qwen3ForCausalLM(MindSporeModelBase):
                         param.set_data(tensor_torch2ms(weight).move_to("Ascend"))
                     # Make sure the weight is loaded on device, so the kv cache calculation is correct.
 
-        def cast_weight_as_nz(params_dict):
-            target_keywords = [
-                "qkv_proj.weight",
-                "o_proj.weight",
-                "gate_up_proj.weight",
-                "down_proj.weight",
-                "lm_head.weight",
-            ]
-
-            for name, param in params_dict.items():
-                if any(name.endswith(keyword) for keyword in target_keywords):
-                    cast_weight = format_cast(param, "nz")
-                    ms.runtime.synchronize()
-                    param.set_data(cast_weight)
-
-        if is_310p():
-            ms.runtime.synchronize()
-            cast_weight_as_nz(param_dict)
-            ms.runtime.synchronize()
-
     def construct(self, **model_inputs) -> Tensor:
         q_seq_lens = model_inputs["q_seq_lens"]
         is_prefill = model_inputs["is_prefill"]
@@ -686,4 +637,4 @@ class Qwen3ForCausalLM(MindSporeModelBase):
             self.model.layers_to_capture = [val + 1 for val in layer_ids]
 
 
-EntryClass = Qwen3ForCausalLM
+EntryClass = LlamaForCausalLM

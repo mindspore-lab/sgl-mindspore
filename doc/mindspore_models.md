@@ -13,7 +13,7 @@ The CANN software packages can download from the [Ascend Official Websites](http
 
 Currently, the following models are supported:
 
-- **Qwen3**: Dense models supported. MoE models coming soon.
+- **Qwen3**: Dense models supported. MoE models coming soon. For speculative decoding, see [MindSpore Eagle Speculative Decoding](./eagle.md).
 - *More models coming soon...*
 
 ## Installation

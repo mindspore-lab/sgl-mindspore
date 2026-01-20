@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the SGLang project
 
 """
-EAGLE-3 draft model for Qwen3 model
+EAGLE-3 draft model for Llama model
 
 Adapted from
 https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/models/llama_eagle3.py
@@ -17,26 +17,28 @@ from mindspore import Tensor, dtype, jit, mint, mutable, nn, ops
 from sglang.srt.distributed import get_tensor_model_parallel_world_size
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
+from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.utils import add_prefix
 
 from sgl_mindspore.layers import (
     ColParallelLinear,
     QKVParallelLinear,
+    ReplicatedLinear,
     RMSNorm,
     VocabParallelEmbedding,
 )
-from sgl_mindspore.models.qwen3 import Qwen3DecoderLayer, Qwen3ForCausalLM, Qwen3MLP
+from sgl_mindspore.models.llama import LlamaDecoderLayer, LlamaForCausalLM, LlamaMLP
 from sgl_mindspore.utils import get_ms_dtype, tensor_torch2ms
 
 logger = logging.getLogger(__name__)
 
-Qwen3Config = None
+LlamaConfig = None
 
 
-class Qwen3DecoderLayerEagle3(Qwen3DecoderLayer):
+class LlamaDecoderLayerEagle3(LlamaDecoderLayer):
     def __init__(
         self,
-        config: Qwen3Config,
+        config: LlamaConfig,
         layer_id: int = 0,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -54,7 +56,7 @@ class Qwen3DecoderLayerEagle3(Qwen3DecoderLayer):
             quant_config=quant_config,
             prefix=add_prefix("qkv_proj", prefix),
         )
-        self.mlp = Qwen3MLP(config, quant_config, prefix)
+        self.mlp = LlamaMLP(config, quant_config, prefix)
 
         self.hidden_norm = RMSNorm(
             norm_dim=config.hidden_size,
@@ -107,10 +109,10 @@ class Qwen3DecoderLayerEagle3(Qwen3DecoderLayer):
         return hidden_states, residual
 
 
-class Qwen3ModelEagle3(nn.Cell):
+class LlamaModelEagle3(nn.Cell):
     def __init__(
         self,
-        config: Qwen3Config,
+        config: LlamaConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
@@ -128,7 +130,7 @@ class Qwen3ModelEagle3(nn.Cell):
         else:
             self.hidden_size_in = config.hidden_size
 
-        self.fc = ColParallelLinear(
+        self.fc = ReplicatedLinear(
             input_size=self.hidden_size_in * 3,
             output_size=config.hidden_size,
             bias=getattr(config, "bias", False),
@@ -137,7 +139,7 @@ class Qwen3ModelEagle3(nn.Cell):
             prefix=add_prefix("fc", prefix),
         )
 
-        self.midlayer = Qwen3DecoderLayerEagle3(config, 0, quant_config, prefix)
+        self.midlayer = LlamaDecoderLayerEagle3(config, 0, quant_config, prefix)
 
         self.norm = RMSNorm(
             norm_dim=config.hidden_size,
@@ -192,10 +194,10 @@ class Qwen3ModelEagle3(nn.Cell):
         return hidden_states_to_logits, [hidden_states_to_aux]
 
 
-class LlamaForCausalLMEagle3(Qwen3ForCausalLM):
+class LlamaForCausalLMEagle3(LlamaForCausalLM):
     def __init__(
         self,
-        config: Qwen3Config,
+        config: LlamaConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
@@ -212,7 +214,7 @@ class LlamaForCausalLMEagle3(Qwen3ForCausalLM):
             param_dtype = ms.dtype.bfloat16
         setattr(self.config, "param_dtype", param_dtype)
 
-        self.model = Qwen3ModelEagle3(config, quant_config, add_prefix("model", prefix))
+        self.model = LlamaModelEagle3(config, quant_config, add_prefix("model", prefix))
 
         self.load_lm_head_from_target = False
         if self.config.tie_word_embeddings:
@@ -234,7 +236,7 @@ class LlamaForCausalLMEagle3(Qwen3ForCausalLM):
         self.hot_token_id = None
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        param_dict = self.parameters_dict()
+        params_dict = self.parameters_dict()
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
@@ -244,11 +246,11 @@ class LlamaForCausalLMEagle3(Qwen3ForCausalLM):
             (".gate_up_proj", ".up_proj", "up"),
         ]
 
-        for name, weight in weights:
+        for name, loaded_weight in weights:
             if "d2t" in name:
                 # d2t stores diffs between draft id and target id
-                weight = tensor_torch2ms(weight).move_to("Ascend")
-                self.hot_token_id = weight + mint.arange(weight.shape[0])
+                loaded_weight = tensor_torch2ms(loaded_weight).move_to("Ascend")
+                self.hot_token_id = loaded_weight + mint.arange(loaded_weight.shape[0])
                 continue
 
             if "t2d" in name:
@@ -258,23 +260,30 @@ class LlamaForCausalLMEagle3(Qwen3ForCausalLM):
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
-                if name in param_dict:
-                    param = param_dict[name]
+                param_name = f"model.{name}" if name not in params_dict else name
+                if param_name in params_dict:
+                    param = params_dict[param_name]
                     assert hasattr(param, "weight_load")
                     weight_load = getattr(param, "weight_load")
-                    weight_load(param, weight, shard_id)
+                    weight_load(param, loaded_weight, shard_id)
                     param.set_data(param.move_to("Ascend"))
                     break
             else:
-                if name in param_dict:
-                    param = param_dict[name]
+                param_name = name if name in params_dict else f"model.{name}"
+                if param_name in params_dict:
+                    param = params_dict[param_name]
                     if hasattr(param, "weight_load"):
-                        weight_load = getattr(param, "weight_load")
-                        weight_load(param, weight)
+                        weight_load = getattr(
+                            param, "weight_load", default_weight_loader
+                        )
+                        weight_load(param, loaded_weight)
                         param.set_data(param.move_to("Ascend"))
                     else:
-                        param.set_data(tensor_torch2ms(weight).move_to("Ascend"))
+                        param.set_data(tensor_torch2ms(loaded_weight).move_to("Ascend"))
                     # Make sure the weight is loaded on device, so the kv cache calculation is correct.
+
+    def get_hot_token_id(self):
+        return self.hot_token_id
 
     def prepare_inputs(self, forward_batch: ForwardBatch, model_inputs: Dict[str, Any]):
         if forward_batch.spec_info:
