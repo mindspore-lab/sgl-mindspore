@@ -49,8 +49,8 @@ class LlamaDecoderLayerEagle3(LlamaDecoderLayer):
         self.self_attn.qkv_proj = QKVParallelLinear(
             2 * self.hidden_size,
             self.self_attn.head_dim,
-            self.self_attn.num_heads,
-            self.self_attn.num_kv_heads,
+            self.self_attn.total_num_heads,
+            self.self_attn.total_num_kv_heads,
             bias=False,
             param_dtype=config.param_dtype,
             quant_config=quant_config,
