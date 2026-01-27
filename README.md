@@ -92,6 +92,15 @@ The `host` and `port` arguments must match the server's setting.
 
 You can modify the test arguments inside the scripts.
 
+### Run on Ascend 310P
+
+Triton is not supported on Ascend 310P. Directly running the code will cause triton compiler errors. Please apply the patch under your SGLang directory:
+```
+cd /path/to/sglang
+git apply --3way /path/to/sgl_mindspore/patches/310p.patch
+```
+If you want to update SGLang's code, you'll need to discard the patch, pull the newest code, and apply the patch again.
+
 
 ## License
 

@@ -584,7 +584,7 @@ class LlamaForCausalLM(MindSporeModelBase):
 
         # TODO: In pure decode scenarios, cumsum and gather operations will be redundant .
         q_seq_lens = mint.cumsum(q_seq_lens, 0)
-        if not forward_mode.is_target_verify():
+        if not (forward_mode.is_target_verify() or forward_mode.is_draft_extend_v2()):
             # In target verify mode, all tokens' logits are needed.
             hidden_states = mint.index_select(hidden_states, 0, q_seq_lens - 1)
 
