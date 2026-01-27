@@ -6,7 +6,7 @@ This is the MindSpore model repository for [SGLang](https://github.com/sgl-proje
 
 ## Support Matrix
 
-| Model | Ascend 910B/C | Ascend 310P |
+| Model | Ascend 910B/910C | Ascend 310P |
 |  ----  | ----  | ----  |
 | Qwen-3 Dense | &#x2705; | &#x2705; |
 | Qwen-3 MoE | &#x2705; | &#x2705; |
@@ -18,7 +18,7 @@ This is a step-by-step guide helping you to run MindSpore models in SGLang.
 
 ### 1. Install CANN
 
-Please install the [CANN 8.3.RC1 community edition](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/83RC1/softwareinst/instg/instg_0000.html). This version is compatible with the MindSpore 2.7.1 nightly build. If you need to use a released version of MindSpore, then you **must install CANN 8.5 and update the NPU driver version to 25.5**. The packages you need to install include **toolkit, kernels and nnal**. Please choose the appropriate packages according to your NPU type.
+Please install the [CANN 8.5 community edition](https://www.hiascend.com/cann/download). The packages you need to install include **toolkit, kernels and nnal**. If you are using CANN 8.3 and do not wish to upgrade, you may use a nightly build of MindSpore 2.7.1. Please refer to Section 4 for details.
 
 ### 2. Install SGLang for the Ascend platform
 
@@ -31,14 +31,19 @@ pip install -e "python[all_npu]"
 
 ### 3. Install sgl-kernel-npu
 
-This step requires GCC version >= 9. You can use `gcc -v` to check you GCC version. If it is lower than 9, please install a newer version.
-
+First download and unzip the packages:
 ```
-git clone https://github.com/sgl-project/sgl-kernel-npu.git
-cd sgl-kernel-npu
-bash build.sh -a kernels
+# for 910B or 310P
+wget https://github.com/sgl-project/sgl-kernel-npu/releases/download/2026.01.21/sgl-kernel-npu_2026.01.21_8.5.0_910b.zip -O tmp.zip && unzip tmp.zip && rm -f tmp.zip
+
+# for A3 (910C)
+wget https://github.com/sgl-project/sgl-kernel-npu/releases/download/2026.01.21/sgl-kernel-npu_2026.01.21_8.5.0_a3.zip -O tmp.zip && unzip tmp.zip && rm -f tmp.zip
+```
+Then install the downloaded packages:
+```
 pip install output/*.whl
 ```
+Alternatively, you can install from source following the guides: https://github.com/sgl-project/sgl-kernel-npu/
 
 ### 4. Install MindSpore models repo
 ```
@@ -46,7 +51,11 @@ git clone https://github.com/mindspore-lab/sgl-mindspore.git
 cd sgl-mindspore
 pip install -e .
 ```
-It will automatically install MindSpore 2.7.1 nightly build. If you need to use a released version, please `pip install mindspore==2.7.2` and upgrade CANN to 8.5.
+It will install MindSpore 2.8.0. If you are using CANN 8.3 and do not wish to change the CANN version, install MindSpore 2.7.1 nightly build instead:
+```
+pip install http://repo.mindspore.cn/mindspore/mindspore/version/202512/20251211/master_20251211010018_65a9c09590c14021cbe38cb8720acb5dad022901_newest/unified/aarch64/mindspore-2.7.1-cp311-cp311-linux_aarch64.whl
+```
+
 
 ## Usage
 

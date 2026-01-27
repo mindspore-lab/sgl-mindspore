@@ -6,7 +6,7 @@
 
 ## 支持矩阵
 
-| 模型 | Ascend 910B/C | Ascend 310P |
+| 模型 | Ascend 910B/910C | Ascend 310P |
 |  ----  | ----  | ----  |
 | Qwen-3 Dense | &#x2705; | &#x2705; |
 | Qwen-3 MoE | &#x2705; | &#x2705; |
@@ -18,9 +18,7 @@
 
 ### 1. 安装CANN
 
-请安装[社区版8.3.RC1](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/83RC1/softwareinst/instg/instg_0000.html)。
-该版本适合MindSpore 2.7.1每日构建版。如果您需要使用MindSpore发行版，**必须安装CANN 8.5并更新NPU驱动至25.5**。
-需要安装的软件包包括**toolkit, kernels和nnal**。请根据您的NPU型号选择合适的软件包。
+请安装[CANN 8.5社区版](https://www.hiascend.com/cann/download)。需要安装的软件包包括**toolkit, kernels和nnal**。如果您使用CANN 8.3且不希望更换版本，也可以选择MindSpore 2.7.1每日构建版。详情请参考第4节。
 
 ### 2. 基于昇腾平台，安装SGLang
 
@@ -33,14 +31,19 @@ pip install -e "python[all_npu]"
 
 ### 3. 安装sgl-kernel-npu
 
-此步骤需要GCC版本>=9。您可以使用 `gcc -v` 检查GCC版本。如果版本低于9，请安装更新的版本。
-
+首先下载并解压安装包:
 ```
-git clone https://github.com/sgl-project/sgl-kernel-npu.git
-cd sgl-kernel-npu
-bash build.sh -a kernels
+# 910B 或 310P
+wget https://github.com/sgl-project/sgl-kernel-npu/releases/download/2026.01.21/sgl-kernel-npu_2026.01.21_8.5.0_910b.zip -O tmp.zip && unzip tmp.zip && rm -f tmp.zip
+
+# A3 (910C)
+wget https://github.com/sgl-project/sgl-kernel-npu/releases/download/2026.01.21/sgl-kernel-npu_2026.01.21_8.5.0_a3.zip -O tmp.zip && unzip tmp.zip && rm -f tmp.zip
+```
+然后安装:
+```
 pip install output/*.whl
 ```
+您也可根据指引从源代码安装: https://github.com/sgl-project/sgl-kernel-npu/
 
 ### 4. 安装MindSpore模型仓库
 ```
@@ -48,7 +51,10 @@ git clone https://github.com/mindspore-lab/sgl-mindspore.git
 cd sgl-mindspore
 pip install -e .
 ```
-该命令会自动安装MindSpore 2.7.1每日构建包。如果您需要使用发行版，请执行`pip install mindspore==2.7.2`，并升级CANN至8.5。
+该命令会安装MindSpore 2.8.0。如果您使用CANN 8.3且不希望更换版本，请安装MindSpore 2.7.1每日构建版：
+```
+pip install http://repo.mindspore.cn/mindspore/mindspore/version/202512/20251211/master_20251211010018_65a9c09590c14021cbe38cb8720acb5dad022901_newest/unified/aarch64/mindspore-2.7.1-cp311-cp311-linux_aarch64.whl
+```
 
 ## 使用示范
 
