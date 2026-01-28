@@ -249,7 +249,7 @@ class FusedExperts(nn.Cell):
         expert_output = self._group_matmul(
             hidden_states=hidden, weight=w2, group_list=group_list
         )
-        if not is_310p:
+        if not is_310p():
             expert_output = mint.nan_to_num(expert_output, 0, 0, 0)
         return expert_output
 

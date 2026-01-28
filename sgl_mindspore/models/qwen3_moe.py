@@ -491,7 +491,7 @@ class Qwen3MoeForCausalLM(MindSporeModelBase):
         num_kv_heads = self.config.num_key_value_heads // self.tp_size
         # use pa, if use ifa, the shape should (None, None, head_size)
         kv_cache_shape = (None, None, None, head_size)
-        if is_310p:
+        if is_310p():
             kv_cache_shape = (None, None, num_kv_heads * head_size)
 
         kv_cache_dtype = self.config.param_dtype
