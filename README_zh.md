@@ -43,7 +43,14 @@ wget https://github.com/sgl-project/sgl-kernel-npu/releases/download/2026.01.21/
 ```
 pip install output/*.whl
 ```
-您也可根据指引从源代码安装: https://github.com/sgl-project/sgl-kernel-npu/
+
+如果您在运行SGLang时遇到类似`version GLIBCXX_3.4.29 not found`的报错，表示您系统的GLIBCXX版本低于编译环境的版本。这种情况下建议从源码构建：
+```
+git clone https://github.com/sgl-project/sgl-kernel-npu.git
+cd sgl-kernel-npu
+bash build.sh -a kernels
+pip install output/*.whl
+```
 
 ### 4. 安装MindSpore模型仓库
 ```
@@ -105,7 +112,7 @@ bash examples/bench_serving.sh
 昇腾310P不支持Triton。直接运行代码会导致triton编译错误。请根据您的SGLang安装目录应用补丁：
 ```
 cd /path/to/sglang
-git apply --3way /path/to/sgl_mindspore/patches/310p.patch
+git apply --3way /path/to/sgl-mindspore/patches/310p.patch
 ```
 如果您需要更新SGLang的代码，请先丢弃补丁，拉取最新代码，然后重新应用补丁。
 
