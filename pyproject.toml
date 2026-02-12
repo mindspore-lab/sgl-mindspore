@@ -24,7 +24,7 @@ dependencies = [
     "sglang",
     "mindspore==2.8.0",
     "torch==2.8.0",
-    "torch_npu==2.8.0",
+    "torch_npu==2.8.0.post2",
     "torchvision",
     "triton-ascend",
     "pybind11",

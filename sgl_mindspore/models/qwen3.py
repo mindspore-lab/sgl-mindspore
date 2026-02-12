@@ -38,10 +38,10 @@ from sgl_mindspore.models.mindspore_model_base import MindSporeModelBase
 from sgl_mindspore.utils import (
     _get_tp_group_name,
     add_prefix,
-    get_ms_dtype,
-    tensor_torch2ms,
     format_cast,
-    is_310p
+    get_ms_dtype,
+    is_310p,
+    tensor_torch2ms,
 )
 
 logger = logging.getLogger(__name__)
@@ -86,6 +86,7 @@ class Qwen3MLP(nn.Cell):
         x = self.act_fn(x)
         x = self.down_proj(x)
         return x
+
 
 class Qwen3Attention(nn.Cell):
     def __init__(
@@ -606,6 +607,8 @@ class Qwen3ForCausalLM(MindSporeModelBase):
             capture_hidden_mode = model_inputs.pop("capture_hidden_mode")
         if "forward_mode" in model_inputs:
             forward_mode = model_inputs.pop("forward_mode")
+        else:
+            forward_mode = None
 
         if self.prev_prefill != is_prefill:
             self.set_model_inputs(is_prefill)
@@ -633,7 +636,7 @@ class Qwen3ForCausalLM(MindSporeModelBase):
 
         # TODO: In pure decode scenarios, cumsum and gather operations will be redundant .
         q_seq_lens = mint.cumsum(q_seq_lens, 0)
-        if not forward_mode.is_target_verify():
+        if forward_mode is None or not forward_mode.is_target_verify():
             # In target verify mode, all tokens' logits are needed.
             hidden_states = mint.index_select(hidden_states, 0, q_seq_lens - 1)
 
