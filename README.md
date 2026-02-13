@@ -43,7 +43,14 @@ Then install the downloaded packages:
 ```
 pip install output/*.whl
 ```
-Alternatively, you can install from source following the guides: https://github.com/sgl-project/sgl-kernel-npu/
+
+If you encounter errors like `version GLIBCXX_3.4.29 not found` when running SGLang, it means your system's GLIBCXX version is lower than the compilation environment. In this case, we recommend building from source:
+```
+git clone https://github.com/sgl-project/sgl-kernel-npu.git
+cd sgl-kernel-npu
+bash build.sh -a kernels
+pip install output/*.whl
+```
 
 ### 4. Install MindSpore models repo
 ```
@@ -106,7 +113,7 @@ You can modify the test arguments inside the scripts.
 Triton is not supported on Ascend 310P. Directly running the code will cause triton compiler errors. Please apply the patch under your SGLang directory:
 ```
 cd /path/to/sglang
-git apply --3way /path/to/sgl_mindspore/patches/310p.patch
+git apply --3way /path/to/sgl-mindspore/patches/310p.patch
 ```
 If you want to update SGLang's code, you'll need to discard the patch, pull the newest code, and apply the patch again.
 
