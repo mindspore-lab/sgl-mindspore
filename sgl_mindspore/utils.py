@@ -3,9 +3,9 @@
 import mindspore as ms
 import torch
 import torch_npu
+from mindspore._c_expression import MSContext
 from mindspore.utils.dlpack import from_dlpack as ms_from_dlpack
 from mindspore.utils.dlpack import to_dlpack as ms_to_dlpack
-from mindspore._c_expression import MSContext
 from sglang.srt.distributed import get_tp_group, get_world_group
 
 FORMAT_TYPE = {
@@ -103,3 +103,64 @@ def get_ascend_soc_version():
 def is_310p():
     device = get_ascend_soc_version()
     return device in ["310p", "ascend310p"]
+
+def patch_triton_310p():
+    """
+    Triton-Ascend is not supported on Ascend 310P.
+    """
+    import torch
+    from sglang.srt.hardware_backend.npu.allocator_npu import (
+        NPUPagedTokenToKVPoolAllocator,
+        _alloc_extend_naive,
+    )
+    from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
+
+    AttentionBackend.support_triton = lambda x:False
+
+    def alloc_extend(
+        self,
+        prefix_lens: torch.Tensor,
+        prefix_lens_cpu: torch.Tensor,
+        seq_lens: torch.Tensor,
+        seq_lens_cpu: torch.Tensor,
+        last_loc: torch.Tensor,
+        extend_num_tokens: int,
+    ):
+        if self.debug_mode:
+            assert torch.all(
+                (last_loc + 1) % self.page_size == prefix_lens % self.page_size
+            )
+
+        num_new_pages = (
+            (seq_lens + self.roundup) // self.page_size
+            - (prefix_lens + self.roundup) // self.page_size
+        ).sum()
+        num_new_pages_item = num_new_pages.item()
+        if self.need_sort and num_new_pages_item > len(self.free_pages):
+            self.merge_and_sort_free()
+
+        if num_new_pages_item > len(self.free_pages):
+            return None
+
+        out_indices = torch.empty(
+            (extend_num_tokens,),
+            dtype=torch.int32,
+            device=self.device,
+        )
+        _alloc_extend_naive(
+            prefix_lens,
+            seq_lens,
+            last_loc,
+            self.free_pages,
+            out_indices,
+            self.page_size,
+            self.device,
+        )
+
+        if self.debug_mode:
+            assert len(torch.unique(out_indices)) == len(out_indices)
+
+        self.free_pages = self.free_pages[num_new_pages_item:]
+        return out_indices.int()
+
+    NPUPagedTokenToKVPoolAllocator.alloc_extend = alloc_extend
