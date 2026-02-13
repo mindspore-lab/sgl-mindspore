@@ -111,7 +111,7 @@ def patch_triton_310p():
     import torch
     from sglang.srt.hardware_backend.npu.allocator_npu import (
         NPUPagedTokenToKVPoolAllocator,
-        _alloc_extend_naive,
+        alloc_extend_naive,
     )
     from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
 
@@ -147,7 +147,7 @@ def patch_triton_310p():
             dtype=torch.int32,
             device=self.device,
         )
-        _alloc_extend_naive(
+        alloc_extend_naive(
             prefix_lens,
             seq_lens,
             last_loc,
