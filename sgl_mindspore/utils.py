@@ -164,3 +164,83 @@ def patch_triton_310p():
         return out_indices.int()
 
     NPUPagedTokenToKVPoolAllocator.alloc_extend = alloc_extend
+
+def patch_memory_pool_310p():
+    """
+    Memory-pool-npu optimization on Ascend 310P.
+    """
+    import torch
+    import mindspore as ms
+    from sglang.srt.constants import GPU_MEMORY_TYPE_KV_CACHE
+    from sglang.srt.hardware_backend.npu.memory_pool_npu import NPUMHATokenToKVPool
+    from sgl_mindspore.utils import is_310p
+
+    def _create_buffers_nz(self):
+        def create_kv_cache(kv_shape, dtype):
+            if len(kv_shape) != 4:
+                raise ValueError(f"Format_Cast op need kv_cache shape be"
+                                f"(batch_size, num_heads, seq_len, head_dim),"
+                                f"but got {len(kv_shape)} dimensions: {kv_shape}")
+            batch_size, num_heads, seq_len, head_dim = kv_shape
+            reshaped_for_nz = (batch_size, num_heads, seq_len * head_dim)
+            zeros_tensor = ms.mint.zeros(reshaped_for_nz, dtype=ms.float16)
+            return ms.ops.auto_generate.format_cast(zeros_tensor, 29)
+        
+        with self.memory_saver_adapter.region(GPU_MEMORY_TYPE_KV_CACHE):
+            kv_shape =  (
+                    self.size // self.page_size + 1,
+                    self.page_size,
+                    self.head_num,
+                    self.head_dim,
+                )
+            self.k_buffer = [
+                create_kv_cache(kv_shape, self.store_dtype)
+                for _ in range(self.layer_num)
+            ]
+            self.v_buffer = [
+                create_kv_cache(kv_shape, self.store_dtype)
+                for _ in range(self.layer_num)
+            ]
+            self.kv_buffer = (self.k_buffer, self.v_buffer)
+
+    def _create_buffers(self):
+        with self.memory_saver_adapter.region(GPU_MEMORY_TYPE_KV_CACHE):
+            # [size, head_num, head_dim] for each layer
+            # The padded slot 0 is used for writing dummy outputs from padded tokens.
+            # Continuous memory improves the efficiency of Ascend`s transmission backend,
+            # while other backends remain unchanged.
+            if is_310p:
+                self._create_buffers_nz()
+                return
+
+            self.kv_buffer = torch.zeros(
+                (
+                    2,
+                    self.layer_num,
+                    self.size // self.page_size + 1,
+                    self.page_size,
+                    self.head_num,
+                    self.head_dim,
+                ),
+                dtype=self.store_dtype,
+                device=self.device,
+            )
+            self.k_buffer = self.kv_buffer[0]
+            self.v_buffer = self.kv_buffer[1]
+
+            if self.use_fia:
+                self.k_buffer = []
+                self.v_buffer = []
+                for i in range(self.layer_num):
+                    k_buffer_layer = self.kv_buffer[0][i].view(
+                        -1, 1, self.head_num, self.head_dim
+                    )
+                    v_buffer_layer = self.kv_buffer[1][i].view(
+                        -1, 1, self.head_num, self.head_dim
+                    )
+                    self.k_buffer.append(k_buffer_layer)
+                    self.v_buffer.append(v_buffer_layer)
+
+    NPUMHATokenToKVPool._create_buffers = _create_buffers
+    NPUMHATokenToKVPool._create_buffers_nz = _create_buffers_nz
+    
