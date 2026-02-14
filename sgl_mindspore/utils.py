@@ -209,7 +209,7 @@ def patch_memory_pool_310p():
             # The padded slot 0 is used for writing dummy outputs from padded tokens.
             # Continuous memory improves the efficiency of Ascend`s transmission backend,
             # while other backends remain unchanged.
-            if is_310p:
+            if is_310p():
                 self._create_buffers_nz()
                 return
 
