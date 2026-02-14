@@ -24,6 +24,7 @@ from sglang.srt.distributed import (
 from sgl_mindspore.utils import (
     _get_tp_group_name,
     is_910b,
+    is_310p,
     split_loaded_weight,
     tensor_torch2ms,
 )
@@ -248,7 +249,8 @@ class FusedExperts(nn.Cell):
         expert_output = self._group_matmul(
             hidden_states=hidden, weight=w2, group_list=group_list
         )
-        expert_output = mint.nan_to_num(expert_output, 0, 0, 0)
+        if not is_310p():
+            expert_output = mint.nan_to_num(expert_output, 0, 0, 0)
         return expert_output
 
     def run_tp_moe(

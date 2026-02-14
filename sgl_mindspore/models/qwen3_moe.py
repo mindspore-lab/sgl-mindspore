@@ -4,7 +4,7 @@ import logging
 import math
 import os
 from functools import lru_cache
-from typing import Iterable, Optional, Tuple, Type, Union
+from typing import Iterable, Optional, Tuple, Type, Union, Any
 
 import mindspore as ms
 import mindspore.common.dtype as mstype
@@ -38,7 +38,7 @@ from sgl_mindspore.layers import (
     YaRNScalingRotaryEmbedding,
 )
 from sgl_mindspore.models.mindspore_model_base import MindSporeModelBase
-from sgl_mindspore.utils import _get_tp_group_name, tensor_torch2ms
+from sgl_mindspore.utils import _get_tp_group_name, tensor_torch2ms, get_ms_dtype, format_cast, is_310p
 
 logger = logging.getLogger(__name__)
 
@@ -455,7 +455,16 @@ class Qwen3MoeForCausalLM(MindSporeModelBase):
         self.prev_prefill = False
 
         self.config = config
-        setattr(self.config, "param_dtype", dtype.bfloat16)
+        if self.config.dtype:
+            param_dtype = get_ms_dtype(self.config.dtype)
+        else:
+            param_dtype = ms.dtype.bfloat16
+        if param_dtype == ms.dtype.bfloat16 and is_310p():
+            param_dtype = ms.float16
+            logger.warning(
+                "Ascend 310P does not support bfloat16, will convert to float16"
+            )
+        setattr(self.config, "param_dtype", param_dtype)
         self.model = Qwen3MoeModel(self.config)
 
         self.lm_head = ColParallelLinear(
@@ -464,6 +473,8 @@ class Qwen3MoeForCausalLM(MindSporeModelBase):
             param_dtype=self.config.param_dtype,
             bias=False,
         )
+        self.lm_head.construct = jit(self.lm_head.construct)
+        self.tp_size = get_tensor_model_parallel_world_size()
         self.all_gather = GatherLastDim()
 
         # for best performance of MindSpore for Qwen3
@@ -477,8 +488,11 @@ class Qwen3MoeForCausalLM(MindSporeModelBase):
         dyn_position_ids = Tensor(shape=[None], dtype=dtype.int64)
 
         head_size = self.config.head_dim
+        num_kv_heads = self.config.num_key_value_heads // self.tp_size
         # use pa, if use ifa, the shape should (None, None, head_size)
         kv_cache_shape = (None, None, None, head_size)
+        if is_310p():
+            kv_cache_shape = (None, None, num_kv_heads * head_size)
 
         kv_cache_dtype = self.config.param_dtype
 
@@ -547,6 +561,10 @@ class Qwen3MoeForCausalLM(MindSporeModelBase):
         )
 
         for name, weight in weights:
+            if is_310p():
+                weight = (weight.to(torch.float16) if
+                    (str(weight.dtype) == "torch.float32" or str(
+                        weight.dtype) == "torch.bfloat16") else weight)
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -594,6 +612,29 @@ class Qwen3MoeForCausalLM(MindSporeModelBase):
                         else:
                             param.set_data(tensor_torch2ms(weight).move_to("Ascend"))
                         # Make sure the weight is loaded on device, so the kv cache calculation is correct.
+
+        def cast_weight_as_nz(params_dict):
+            target_keywords = [
+                "qkv_proj.weight",
+                "o_proj.weight",
+                "gate_up_proj.weight",
+                "down_proj.weight",
+                "lm_head.weight",
+                "experts.w13_weight",
+                "experts.w2_weight",
+                "gate.weight",
+            ]
+
+            for name, param in params_dict.items():
+                if any(name.endswith(keyword) for keyword in target_keywords):
+                    cast_weight = format_cast(param, "nz")
+                    ms.runtime.synchronize()
+                    param.set_data(cast_weight)
+
+        if is_310p():
+            ms.runtime.synchronize()
+            cast_weight_as_nz(param_dict)
+            ms.runtime.synchronize()
 
     def construct(self, **model_inputs) -> Tensor:
         q_seq_lens = model_inputs["q_seq_lens"]
