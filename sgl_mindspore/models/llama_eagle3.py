@@ -130,15 +130,6 @@ class LlamaModelEagle3(nn.Cell):
         else:
             self.hidden_size_in = config.hidden_size
 
-        self.fc = ReplicatedLinear(
-            input_size=self.hidden_size_in * 3,
-            output_size=config.hidden_size,
-            bias=getattr(config, "bias", False),
-            param_dtype=config.param_dtype,
-            quant_config=quant_config,
-            prefix=add_prefix("fc", prefix),
-        )
-
         self.midlayer = LlamaDecoderLayerEagle3(config, 0, quant_config, prefix)
 
         self.norm = RMSNorm(
@@ -147,6 +138,7 @@ class LlamaModelEagle3(nn.Cell):
             param_dtype=config.param_dtype,
         )
 
+    @jit
     def construct(
         self,
         input_ids,
@@ -162,12 +154,6 @@ class LlamaModelEagle3(nn.Cell):
         block_tables=None,
     ):
         embeds = self.embed_tokens(input_ids)
-        if hidden_states.shape[-1] != embeds.shape[-1]:
-            hidden_states = self.fc(hidden_states)
-
-        # idle batch
-        if hidden_states.shape[0] == 0:
-            return hidden_states, [hidden_states]
 
         residual = None
         hidden_states, residual = self.midlayer(
@@ -232,8 +218,17 @@ class LlamaForCausalLMEagle3(LlamaForCausalLM):
                 prefix=add_prefix("lm_head", prefix),
             )
 
+        self.lm_head.construct = jit(self.lm_head.construct)
         self.capture_aux_hidden_states = True
         self.hot_token_id = None
+        self.fc = ReplicatedLinear(
+            input_size=config.hidden_size * 3,
+            output_size=config.hidden_size,
+            bias=getattr(config, "bias", False),
+            param_dtype=config.param_dtype,
+            quant_config=quant_config,
+            prefix=add_prefix("fc", prefix),
+        )
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         params_dict = self.parameters_dict()
@@ -281,6 +276,119 @@ class LlamaForCausalLMEagle3(LlamaForCausalLM):
                     else:
                         param.set_data(tensor_torch2ms(loaded_weight).move_to("Ascend"))
                     # Make sure the weight is loaded on device, so the kv cache calculation is correct.
+
+    def set_model_inputs(self, is_prefill):
+        dyn_input_ids = Tensor(shape=[None], dtype=dtype.int32)
+        dyn_position_ids = Tensor(shape=[None], dtype=dtype.int64)
+
+        head_size = self.config.head_dim
+        # use pa, if use ifa, the shape should (None, None, head_size)
+        kv_cache_shape = (None, None, None, head_size)
+
+        kv_cache_dtype = self.config.param_dtype
+
+        num_layers = self.config.num_hidden_layers
+
+        dyn_key_cache = Tensor(shape=kv_cache_shape, dtype=kv_cache_dtype)
+        dyn_value_cache = Tensor(shape=kv_cache_shape, dtype=kv_cache_dtype)
+        dyn_key_caches = mutable([dyn_key_cache for _ in range(num_layers)])
+        dyn_value_caches = mutable([dyn_value_cache for _ in range(num_layers)])
+
+        dyn_out_cache_loc = Tensor(
+            shape=[
+                None,
+            ],
+            dtype=dtype.int32,
+        )
+        dynamic_attention_mask = Tensor(
+            shape=[None, None], dtype=self.config.param_dtype
+        )
+        dyn_batch_valid_length = Tensor(
+            shape=[
+                None,
+            ],
+            dtype=dtype.int32,
+        )
+        dyn_q_seq_lens = Tensor(
+            shape=[
+                None,
+            ],
+            dtype=dtype.int32,
+        )
+        dynamic_hidden_states = Tensor(
+            shape=[None, None], dtype=self.config.param_dtype
+        )
+        dyn_block_tables = Tensor(shape=[None, None], dtype=dtype.int32)
+        # dyn_intermediate_tensors = None
+        # dyn_inputs_embeds = None
+        self.model.set_inputs(
+            input_ids=dyn_input_ids,
+            position_ids=dyn_position_ids,
+            hidden_states=dynamic_hidden_states,
+            attention_mask=dynamic_attention_mask,
+            batch_valid_length=dyn_batch_valid_length,
+            is_prefill=is_prefill,
+            q_seq_lens=dyn_q_seq_lens,
+            key_cache=dyn_key_caches,
+            value_cache=dyn_value_caches,
+            out_cache_loc=dyn_out_cache_loc,
+            block_tables=dyn_block_tables,
+        )
+        self.lm_head.set_inputs(dynamic_hidden_states)
+
+    def construct(self, **model_inputs) -> Tensor:
+        q_seq_lens = model_inputs["q_seq_lens"]
+        is_prefill = model_inputs["is_prefill"]
+        if "capture_hidden_mode" in model_inputs:
+            capture_hidden_mode = model_inputs.pop("capture_hidden_mode")
+        if "forward_mode" in model_inputs:
+            forward_mode = model_inputs.pop("forward_mode")
+        else:
+            forward_mode = None
+
+        if self.prev_prefill != is_prefill:
+            self.set_model_inputs(is_prefill)
+        self.prev_prefill = is_prefill
+
+        if is_prefill:
+            self.model.phase = "prefill"
+        else:
+            self.model.phase = "increment"
+
+        hidden_states = model_inputs["hidden_states"]
+        if hidden_states.shape[-1] != self.config.hidden_size:
+            hidden_states = self.fc(hidden_states)
+        model_inputs["hidden_states"] = hidden_states
+        hidden_states = self.model(**model_inputs)
+
+        if self.capture_aux_hidden_states:
+            hidden_states, aux_hidden_states = hidden_states
+            if capture_hidden_mode.need_capture():
+                if capture_hidden_mode.is_full():
+                    aux_hidden_states = mint.cat(aux_hidden_states, dim=-1)
+                elif capture_hidden_mode.is_last():
+                    aux_hidden_states = mint.cat(aux_hidden_states, dim=-1)
+                    aux_hidden_states = mint.index_select(
+                        aux_hidden_states, 0, mint.cumsum(q_seq_lens, 0) - 1
+                    )
+                else:
+                    assert False, "Unsupported capture hidden mode"
+
+        # TODO: In pure decode scenarios, cumsum and gather operations will be redundant .
+        q_seq_lens = mint.cumsum(q_seq_lens, 0)
+        if not (forward_mode.is_target_verify() or forward_mode.is_draft_extend_v2()):
+            # In target verify mode, all tokens' logits are needed.
+            hidden_states = mint.index_select(hidden_states, 0, q_seq_lens - 1)
+
+        logits = self.lm_head(hidden_states)
+        if self.tp_size:
+            logits = self.all_gather(logits)
+        logits = mint.reshape(logits, (-1, logits.shape[-1]))
+
+        if self.capture_aux_hidden_states:
+            return logits, aux_hidden_states
+        else:
+            return logits
 
     def get_hot_token_id(self):
         return self.hot_token_id

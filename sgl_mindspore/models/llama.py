@@ -557,6 +557,8 @@ class LlamaForCausalLM(MindSporeModelBase):
             capture_hidden_mode = model_inputs.pop("capture_hidden_mode")
         if "forward_mode" in model_inputs:
             forward_mode = model_inputs.pop("forward_mode")
+        else:
+            forward_mode = None
 
         if self.prev_prefill != is_prefill:
             self.set_model_inputs(is_prefill)
