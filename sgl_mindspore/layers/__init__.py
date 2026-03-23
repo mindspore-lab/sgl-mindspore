@@ -4,6 +4,7 @@ from sgl_mindspore.layers.activation import SwiGLU
 from sgl_mindspore.layers.attention import MsNativeAttnBackend
 from sgl_mindspore.layers.linear import (
     ColParallelLinear,
+    MergedColParallelLinear,
     MLPColParallelLinear,
     MoeReplicatedLinear,
     QKVParallelLinear,
@@ -11,10 +12,11 @@ from sgl_mindspore.layers.linear import (
     RowParallelLinear,
 )
 from sgl_mindspore.layers.moe import *
-from sgl_mindspore.layers.norm import RMSNorm
+from sgl_mindspore.layers.norm import GemmaRMSNorm, RMSNorm
 from sgl_mindspore.layers.rope import (
     BaseRotaryEmbedding,
     DeepseekScalingRotaryEmbedding,
+    PartialRotaryEmbedding,
     YaRNScalingRotaryEmbedding,
     yarn_get_mscale,
 )

@@ -373,6 +373,52 @@ class ReplicatedLinear(LinearBase):
         return None
 
 
+class MergedColParallelLinear(ColParallelLinear):
+    """ColumnParallelLinear with multiple output sections sharded independently.
+
+    Used for projections like in_proj_qkv where the fused weight has sections of
+    different sizes (e.g. [key_dim, key_dim, value_dim]) that each need to be
+    sharded across TP ranks.
+    """
+
+    def __init__(
+        self,
+        input_size: int,
+        output_sizes: list,
+        bias: bool,
+        param_dtype: Optional[Type] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+        tp_rank: Optional[int] = None,
+        tp_size: Optional[int] = None,
+    ) -> None:
+        total_output = sum(output_sizes)
+        super().__init__(
+            input_size=input_size,
+            output_size=total_output,
+            bias=bias,
+            param_dtype=param_dtype,
+            quant_config=quant_config,
+            prefix=prefix,
+            tp_rank=tp_rank,
+            tp_size=tp_size,
+        )
+        self.output_sizes = output_sizes
+
+    def weight_load(self, param: Parameter, weight: torch.Tensor, shard_id=None) -> None:
+        """Load fused weight by sharding each section independently."""
+        tp_rank = self.tp_rank
+        tp_size = self.tp_size
+        param_offset = 0
+        weight_offset = 0
+        for size in self.output_sizes:
+            shard_size = size // tp_size
+            w_shard = weight.narrow(0, weight_offset + tp_rank * shard_size, shard_size).contiguous()
+            param[param_offset : param_offset + shard_size, :] = tensor_torch2ms(w_shard)
+            weight_offset += size
+            param_offset += shard_size
+
+
 class MoeReplicatedLinear(nn.Cell):
     def __init__(
         self,

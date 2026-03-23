@@ -219,6 +219,64 @@ class BaseRotaryEmbedding(nn.Cell):
         )
 
 
+class PartialRotaryEmbedding(nn.Cell):
+    """Apply RoPE only to the first `rotary_dim` dims of each head, pass the rest through unchanged."""
+
+    def __init__(
+        self,
+        head_size: int,
+        rotary_dim: int,
+        max_position_embeddings: int,
+        base: int,
+        dtype,
+    ) -> None:
+        super().__init__()
+        self.head_size = head_size
+        self.rotary_dim = rotary_dim
+        self._base_rope = BaseRotaryEmbedding(
+            head_size=rotary_dim,
+            rotary_dim=rotary_dim,
+            max_position_embeddings=max_position_embeddings,
+            base=base,
+            dtype=dtype,
+        )
+
+    def construct(
+        self,
+        positions: Tensor,
+        query: Tensor,
+        key: Tensor,
+        batch_valid_length: Tensor,
+        is_prefill: bool,
+        offsets=None,
+    ) -> Tuple[Tensor, Tensor]:
+        T_q = query.shape[0]
+        T_k = key.shape[0]
+        num_heads = query.shape[-1] // self.head_size
+        num_kv_heads = key.shape[-1] // self.head_size
+
+        q = query.reshape(T_q, num_heads, self.head_size)
+        k = key.reshape(T_k, num_kv_heads, self.head_size)
+
+        q_rot = q[..., : self.rotary_dim].reshape(T_q, num_heads * self.rotary_dim)
+        q_pass = q[..., self.rotary_dim :]
+        k_rot = k[..., : self.rotary_dim].reshape(T_k, num_kv_heads * self.rotary_dim)
+        k_pass = k[..., self.rotary_dim :]
+
+        q_rot, k_rot = self._base_rope(
+            positions, q_rot, k_rot, batch_valid_length, is_prefill
+        )
+
+        q_rot = q_rot.reshape(T_q, num_heads, self.rotary_dim)
+        k_rot = k_rot.reshape(T_k, num_kv_heads, self.rotary_dim)
+
+        q = mint.cat([q_rot, q_pass], dim=-1).reshape(T_q, num_heads * self.head_size)
+        k = mint.cat([k_rot, k_pass], dim=-1).reshape(
+            T_k, num_kv_heads * self.head_size
+        )
+        return q, k
+
+
 class DeepseekScalingRotaryEmbedding(BaseRotaryEmbedding):
     def __init__(
         self,
